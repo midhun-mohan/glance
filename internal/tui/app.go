@@ -985,7 +985,7 @@ func (m Model) View() string {
 	sections = append(sections, prListView)
 
 	// Status bar
-	statusBar := renderStatusBar(m.lastRefresh, m.loading, m.refreshInterval, m.hourglassFrame, innerWidth)
+	statusBar := renderStatusBar(m.lastRefresh, m.loading, m.firstLoad, m.refreshInterval, m.hourglassFrame, innerWidth)
 	sections = append(sections, statusBar)
 
 	content := strings.Join(sections, "\n")

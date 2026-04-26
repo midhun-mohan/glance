@@ -7,11 +7,14 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-func renderStatusBar(lastRefresh time.Time, loading bool, refreshInterval time.Duration, hourglassFrame int, width int) string {
+func renderStatusBar(lastRefresh time.Time, loading bool, firstLoad bool, refreshInterval time.Duration, hourglassFrame int, width int) string {
 	left := renderHelpBar(width)
 
 	var right string
-	if loading {
+	if loading && firstLoad {
+		hourglass := hourglassFrames[hourglassFrame%len(hourglassFrames)]
+		right = spinnerStyle.Render(hourglass + " Loading...")
+	} else if loading {
 		right = spinnerStyle.Render("⟳ Refreshing...")
 	} else if !lastRefresh.IsZero() {
 		remaining := refreshInterval - time.Since(lastRefresh)
