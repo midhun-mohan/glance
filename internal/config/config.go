@@ -87,13 +87,13 @@ func DefaultConfig() Config {
 
 func ConfigDir() (string, error) {
 	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
-		return filepath.Join(xdg, "mygit"), nil
+		return filepath.Join(xdg, "glance"), nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".config", "mygit"), nil
+	return filepath.Join(home, ".config", "glance"), nil
 }
 
 func ConfigPath() (string, error) {
@@ -109,7 +109,7 @@ func ConfigPath() (string, error) {
 	if err != nil {
 		return primary, nil
 	}
-	fallback := filepath.Join(home, ".mygit.yaml")
+	fallback := filepath.Join(home, ".glance.yaml")
 	if _, err := os.Stat(fallback); err == nil {
 		return fallback, nil
 	}

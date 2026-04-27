@@ -9,9 +9,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 
-	"github.com/midhunmohan/mygit/internal/config"
-	"github.com/midhunmohan/mygit/internal/github"
-	"github.com/midhunmohan/mygit/internal/tui"
+	"github.com/midhun-mohan/glance/internal/config"
+	"github.com/midhun-mohan/glance/internal/github"
+	"github.com/midhun-mohan/glance/internal/tui"
 )
 
 var (
@@ -27,9 +27,9 @@ var (
 
 func main() {
 	rootCmd := &cobra.Command{
-		Use:   "mygit",
+		Use:   "glance",
 		Short: "Your GitHub pull requests, at a glance",
-		Long:  "mygit is an interactive terminal UI tool that gives developers a unified dashboard of their GitHub pull requests across all organizations they belong to.",
+		Long:  "glance is an interactive terminal UI tool that gives developers a unified dashboard of their GitHub pull requests across all organizations they belong to.",
 		RunE:  run,
 	}
 

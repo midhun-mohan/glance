@@ -104,11 +104,21 @@ const (
 type CheckRun struct {
 	Name   string
 	Status CheckStatus
+	URL    string
 }
 
 type ReviewEntry struct {
 	Author string
 	State  string // APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED
+}
+
+type ReviewComment struct {
+	Author    string
+	Body      string
+	Path      string
+	Line      int
+	Side      string // "LEFT" or "RIGHT"
+	CreatedAt time.Time
 }
 
 type ChangedFile struct {
@@ -136,6 +146,7 @@ type PRDetail struct {
 	ReviewDecision string
 	BaseRefName    string
 	HeadRefName    string
+	HeadCommitSHA  string
 	IsDraft        bool
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
@@ -146,4 +157,5 @@ type PRDetail struct {
 	Reviews        []ReviewEntry
 	Checks         []CheckRun
 	Files          []ChangedFile
+	ReviewComments []ReviewComment
 }

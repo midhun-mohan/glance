@@ -4,12 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-mygit is a terminal dashboard for monitoring GitHub pull requests across organizations. It uses Bubble Tea for the TUI, Cobra for CLI parsing, and GitHub's GraphQL API (authenticated via `gh` CLI) to fetch PRs in four sections: Created, Review Requested, Assigned, and Mentions.
+glance is a terminal dashboard for monitoring GitHub pull requests across organizations. It uses Bubble Tea for the TUI, Cobra for CLI parsing, and GitHub's GraphQL API (authenticated via `gh` CLI) to fetch PRs in four sections: Created, Review Requested, Assigned, and Mentions.
 
 ## Build & Development Commands
 
 ```bash
-make build          # Compile to bin/mygit (injects version via ldflags)
+make build          # Compile to bin/glance (injects version via ldflags)
 make run            # Build and execute
 make install        # Install globally
 make test           # Run all tests
@@ -21,11 +21,11 @@ The version string is injected into `internal/config.Version` at build time.
 
 ## Architecture
 
-**Entry point**: `cmd/mygit/main.go` — Cobra CLI setup, validates `gh` auth, loads config, initializes Bubble Tea program.
+**Entry point**: `cmd/glance/main.go` — Cobra CLI setup, validates `gh` auth, loads config, initializes Bubble Tea program.
 
 **Internal packages** (all under `internal/`):
 
-- **config** — XDG-compliant YAML config loading. Primary path: `~/.config/mygit/config.yaml`, fallback: `~/.mygit.yaml`. Handles org lists, refresh intervals, notification toggles, filter presets, and UI theme settings.
+- **config** — XDG-compliant YAML config loading. Primary path: `~/.config/glance/config.yaml`, fallback: `~/.glance.yaml`. Handles org lists, refresh intervals, notification toggles, filter presets, and UI theme settings.
 
 - **github** — GitHub API layer. Auth delegates to `gh auth token`. `client.go` makes GraphQL requests. `types.go` defines core domain types: `PullRequest`, `Section` (enum 0-3), `PRStatus`, `ReviewStatus`, and `PRsBySection` map.
 

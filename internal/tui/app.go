@@ -11,10 +11,10 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/midhunmohan/mygit/internal/config"
-	"github.com/midhunmohan/mygit/internal/filter"
-	"github.com/midhunmohan/mygit/internal/github"
-	"github.com/midhunmohan/mygit/internal/notify"
+	"github.com/midhun-mohan/glance/internal/config"
+	"github.com/midhun-mohan/glance/internal/filter"
+	"github.com/midhun-mohan/glance/internal/github"
+	"github.com/midhun-mohan/glance/internal/notify"
 )
 
 const (
@@ -36,6 +36,7 @@ type Model struct {
 	// Data
 	prs           github.PRsBySection
 	orgs          []string
+	unseenPRs     map[string]bool // PR URLs that appeared since last view
 
 	// UI state
 	activeSection github.Section
@@ -71,6 +72,12 @@ type Model struct {
 	fileListScroll int // scroll offset for file list
 	diffScroll     int // scroll offset for diff
 	infoScroll     int // scroll offset for info panel
+	checkCursor    int // selected check in info panel checks section
+	checkNoURL     bool // briefly show "No URL available" message
+	diffCursor     int  // line-level cursor in diff panel
+	commentMode    bool // typing a review comment
+	commentInput   string
+	commentLoading bool
 
 	// Loading / refresh countdown
 	loading        bool
@@ -121,6 +128,13 @@ type confirmContext struct {
 	title  string
 }
 
+type clearCheckNoURLMsg struct{}
+
+type commentResultMsg struct {
+	success bool
+	message string
+}
+
 type tickMsg time.Time
 type countdownTickMsg time.Time
 
@@ -145,6 +159,7 @@ func NewModel(cfg config.Config, client *github.Client, startSection github.Sect
 		activeSection:   startSection,
 		refreshInterval: cfg.Refresh.IntervalDuration(),
 		collapsedRepos:  make(map[string]bool),
+		unseenPRs:       make(map[string]bool),
 		prs: github.PRsBySection{
 			github.SectionCreated:         {},
 			github.SectionReviewRequested: {},
@@ -191,11 +206,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		m.lastRefresh = time.Now()
 		m.err = nil
-		// Only send notifications for PRs that appear after the initial load
+		// Only send notifications and mark unseen for PRs that appear after the initial load
 		if m.firstLoad {
 			m.firstLoad = false
 		} else {
 			go m.notifier.Diff(oldPRs, msg.prs)
+			// Mark new PRs as unseen
+			for _, section := range sectionOrder {
+				oldSet := make(map[string]bool)
+				for _, pr := range oldPRs[section] {
+					oldSet[pr.URL] = true
+				}
+				for _, pr := range msg.prs[section] {
+					if !oldSet[pr.URL] {
+						m.unseenPRs[pr.URL] = true
+					}
+				}
+			}
 		}
 		return m, nil
 
@@ -217,6 +244,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		m.loading = true
 		return m, tea.Batch(m.fetchPRs(), m.autoRefreshTick())
+
+	case clearCheckNoURLMsg:
+		m.checkNoURL = false
+		return m, nil
+
+	case commentResultMsg:
+		m.commentLoading = false
+		m.commentMode = false
+		m.commentInput = ""
+		m.confirmResult = msg.message
+		if msg.success && m.showDetail && m.detailData != nil {
+			// Re-fetch detail to show the new comment
+			pr := github.PullRequest{
+				Repository: m.detailData.Repository,
+				Number:     m.detailData.Number,
+			}
+			return m, m.fetchPRDetail(pr)
+		}
+		return m, nil
 
 	case countdownTickMsg:
 		m.hourglassFrame = (m.hourglassFrame + 1) % len(hourglassFrames)
@@ -342,6 +388,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		ps := m.currentPageSize()
 		items, _ := m.pagedDisplayItems(ps)
 		if m.cursor >= 0 && m.cursor < len(items) && items[m.cursor].isPR {
+			delete(m.unseenPRs, items[m.cursor].pr.URL)
 			m.showDetail = true
 			m.detailLoading = true
 			m.detailData = nil
@@ -352,6 +399,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.fileListScroll = 0
 			m.diffScroll = 0
 			m.infoScroll = 0
+			m.checkCursor = 0
+			m.checkNoURL = false
+			m.diffCursor = 0
+			m.commentMode = false
+			m.commentInput = ""
 			return m, m.fetchPRDetail(items[m.cursor].pr)
 		}
 		return m, nil
@@ -400,6 +452,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.collapsedRepos[repo] = true
 			}
 		}
+		return m, nil
+	case "E":
+		// Expand all collapsed groups
+		m.collapsedRepos = make(map[string]bool)
+		m.cursor = 0
+		m.page = 0
 		return m, nil
 	case "?":
 		m.showHelp = !m.showHelp
@@ -504,6 +562,11 @@ func (m Model) handlePresetKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Comment input mode intercepts all keys
+	if m.commentMode {
+		return m.handleCommentKey(msg)
+	}
+
 	// Global keys (any focus)
 	switch msg.String() {
 	case "esc":
@@ -514,7 +577,20 @@ func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "o":
 		if m.detailData != nil {
-			openBrowser(m.detailData.URL)
+			// Context-aware: open check URL when info panel is focused with checks
+			if m.detailFocus == 1 && m.detailRightTab == 1 && len(m.detailData.Checks) > 0 {
+				ch := m.detailData.Checks[m.checkCursor]
+				if ch.URL != "" {
+					openBrowser(ch.URL)
+				} else {
+					m.checkNoURL = true
+					return m, tea.Tick(2*time.Second, func(t time.Time) tea.Msg {
+						return clearCheckNoURLMsg{}
+					})
+				}
+			} else {
+				openBrowser(m.detailData.URL)
+			}
 		}
 		return m, nil
 	case "y":
@@ -583,6 +659,32 @@ func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+	case "c":
+		if m.detailData != nil {
+			// If diff panel focused on a commentable line, do inline review comment
+			if m.detailFocus == 1 && m.detailRightTab == 0 && m.fileCursor < len(m.detailData.Files) {
+				f := m.detailData.Files[m.fileCursor]
+				if f.Patch != "" {
+					meta := parseDiffLinesMeta(f.Patch)
+					if m.diffCursor < len(meta) && meta[m.diffCursor].commentable {
+						m.commentMode = true
+						m.commentInput = ""
+						return m, nil
+					}
+				}
+			}
+			// Otherwise, open general PR comment dialog
+			owner, repo := github.SplitOwnerRepo(m.detailData.Repository)
+			m.confirmMode = "comment"
+			m.confirmInput = ""
+			m.confirmPR = &confirmContext{
+				owner:  owner,
+				repo:   repo,
+				number: m.detailData.Number,
+				title:  m.detailData.Title,
+			}
+		}
+		return m, nil
 	}
 
 	// Focus-specific keys
@@ -592,13 +694,15 @@ func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "up", "k":
 			if m.fileCursor > 0 {
 				m.fileCursor--
-				m.diffScroll = 0 // reset diff scroll when changing file
+				m.diffScroll = 0
+				m.diffCursor = 0
 			}
 			return m, nil
 		case "down", "j":
 			if m.detailData != nil && m.fileCursor < len(m.detailData.Files)-1 {
 				m.fileCursor++
 				m.diffScroll = 0
+				m.diffCursor = 0
 			}
 			return m, nil
 		case "enter":
@@ -608,12 +712,16 @@ func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	} else {
-		// Right panel: scroll diff or info
+		// Right panel: diff cursor or info navigation
 		switch msg.String() {
 		case "up", "k":
 			if m.detailRightTab == 0 {
-				if m.diffScroll > 0 {
-					m.diffScroll--
+				if m.diffCursor > 0 {
+					m.diffCursor--
+				}
+			} else if m.detailData != nil && len(m.detailData.Checks) > 0 {
+				if m.checkCursor > 0 {
+					m.checkCursor--
 				}
 			} else {
 				if m.infoScroll > 0 {
@@ -623,7 +731,17 @@ func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "down", "j":
 			if m.detailRightTab == 0 {
-				m.diffScroll++
+				maxLine := m.diffLineCount() - 1
+				if maxLine < 0 {
+					maxLine = 0
+				}
+				if m.diffCursor < maxLine {
+					m.diffCursor++
+				}
+			} else if m.detailData != nil && len(m.detailData.Checks) > 0 {
+				if m.checkCursor < len(m.detailData.Checks)-1 {
+					m.checkCursor++
+				}
 			} else {
 				m.infoScroll++
 			}
@@ -634,6 +752,73 @@ func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+func (m Model) handleCommentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.commentLoading {
+		return m, nil
+	}
+
+	switch msg.String() {
+	case "esc":
+		m.commentMode = false
+		m.commentInput = ""
+		return m, nil
+	case "enter":
+		if strings.TrimSpace(m.commentInput) == "" {
+			return m, nil
+		}
+		m.commentLoading = true
+		return m, m.submitComment()
+	case "backspace":
+		if len(m.commentInput) > 0 {
+			m.commentInput = m.commentInput[:len(m.commentInput)-1]
+		}
+		return m, nil
+	default:
+		if len(msg.String()) == 1 {
+			m.commentInput += msg.String()
+		}
+		return m, nil
+	}
+}
+
+func (m Model) submitComment() tea.Cmd {
+	d := m.detailData
+	fileCursor := m.fileCursor
+	diffCursor := m.diffCursor
+	body := m.commentInput
+	client := m.client
+
+	return func() tea.Msg {
+		if d == nil || fileCursor >= len(d.Files) {
+			return commentResultMsg{success: false, message: "✗ No file selected"}
+		}
+		f := d.Files[fileCursor]
+		meta := parseDiffLinesMeta(f.Patch)
+		if diffCursor >= len(meta) || !meta[diffCursor].commentable {
+			return commentResultMsg{success: false, message: "✗ Cannot comment on this line"}
+		}
+		owner, repo := github.SplitOwnerRepo(d.Repository)
+		position := diffCursor + 1 // 1-based position in the diff
+		err := client.CreateReviewComment(owner, repo, d.Number, d.HeadCommitSHA, f.Filename, body, position)
+		if err != nil {
+			return commentResultMsg{success: false, message: fmt.Sprintf("✗ Failed: %v", err)}
+		}
+		return commentResultMsg{success: true, message: "✓ Comment added"}
+	}
+}
+
+// diffLineCount returns the number of diff lines for the current file.
+func (m Model) diffLineCount() int {
+	if m.detailData == nil || m.fileCursor >= len(m.detailData.Files) {
+		return 0
+	}
+	f := m.detailData.Files[m.fileCursor]
+	if f.Patch == "" {
+		return 0
+	}
+	return len(strings.Split(f.Patch, "\n"))
 }
 
 func (m Model) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -648,7 +833,7 @@ func (m Model) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.confirmPR = nil
 		return m, nil
 	case "enter":
-		if m.confirmMode == "reject" && strings.TrimSpace(m.confirmInput) == "" {
+		if (m.confirmMode == "reject" || m.confirmMode == "comment") && strings.TrimSpace(m.confirmInput) == "" {
 			return m, nil
 		}
 		m.confirmLoading = true
@@ -693,6 +878,12 @@ func (m Model) submitPRAction() tea.Cmd {
 				return prActionResultMsg{success: false, message: fmt.Sprintf("✗ Failed: %v", err)}
 			}
 			return prActionResultMsg{success: true, message: "✓ PR merged"}
+		case "comment":
+			err := client.CreatePRComment(pr.owner, pr.repo, pr.number, input)
+			if err != nil {
+				return prActionResultMsg{success: false, message: fmt.Sprintf("✗ Failed: %v", err)}
+			}
+			return prActionResultMsg{success: true, message: "✓ Comment added"}
 		}
 		return prActionResultMsg{success: false, message: "✗ Unknown action"}
 	}
@@ -908,10 +1099,16 @@ func (m Model) View() string {
 
 	// Tabs
 	counts := make(map[github.Section]int)
+	unseenCounts := make(map[github.Section]int)
 	for _, s := range sectionOrder {
 		counts[s] = len(m.prs[s])
+		for _, pr := range m.prs[s] {
+			if m.unseenPRs[pr.URL] {
+				unseenCounts[s]++
+			}
+		}
 	}
-	tabs := renderTabs(m.activeSection, counts, innerWidth)
+	tabs := renderTabs(m.activeSection, counts, unseenCounts, innerWidth)
 	chrome = append(chrome, tabs)
 
 	// Filter bar
@@ -980,7 +1177,7 @@ func (m Model) View() string {
 		sections = append(sections, pageInfo)
 	}
 
-	prList := renderPRList(items, m.cursor, innerWidth, m.activeSection)
+	prList := renderPRList(items, m.cursor, innerWidth, m.activeSection, m.unseenPRs)
 	prListView := lipgloss.NewStyle().Height(availableListHeight).MaxHeight(availableListHeight).Render(prList)
 	sections = append(sections, prListView)
 
@@ -1000,7 +1197,7 @@ func (m Model) View() string {
 }
 
 func renderHeader(orgs []string, width int) string {
-	title := headerStyle.Render("mygit")
+	title := headerStyle.Render("glance")
 
 	orgInfo := ""
 	if len(orgs) > 0 {
@@ -1075,6 +1272,15 @@ func (m Model) renderConfirmDialog() string {
 		lines = append(lines, title)
 		lines = append(lines, "")
 		lines = append(lines, helpDescStyle.Render("Commit: ")+detailBodyStyle.Render(fmt.Sprintf(`"%s"`, commitMsg)))
+
+	case "comment":
+		title := lipgloss.NewStyle().Bold(true).Foreground(secondaryColor).Render(
+			fmt.Sprintf("Comment on PR #%d", pr.number))
+		lines = append(lines, title)
+		lines = append(lines, "")
+		lines = append(lines, helpDescStyle.Render("Comment (required):"))
+		inputBox := confirmInputStyle.Width(35).Render(m.confirmInput + "█")
+		lines = append(lines, inputBox)
 	}
 
 	if m.confirmLoading {
@@ -1142,6 +1348,14 @@ func (m Model) fetchPRDetail(pr github.PullRequest) tea.Cmd {
 			detail.Files = nil
 		} else {
 			detail.Files = files
+		}
+		// Fetch inline review comments
+		comments, err := m.client.FetchPRReviewComments(owner, repo, pr.Number)
+		if err != nil {
+			// Non-fatal: show detail without comments
+			detail.ReviewComments = nil
+		} else {
+			detail.ReviewComments = comments
 		}
 		return prDetailLoadedMsg{detail: *detail}
 	}

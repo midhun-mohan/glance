@@ -160,4 +160,22 @@ var (
 				Border(lipgloss.NormalBorder()).
 				BorderForeground(mutedColor).
 				Padding(0, 1)
+
+	// Unseen PR indicator
+	unseenDotStyle = lipgloss.NewStyle().
+			Foreground(dangerColor).
+			Bold(true)
+
+	// Diff cursor highlight
+	diffCursorStyle = lipgloss.NewStyle().
+			Background(lipgloss.Color("#374151")).
+			Foreground(lipgloss.Color("#F9FAFB"))
+
+	// Inline review comment styles
+	commentHeaderStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#A78BFA")).
+				Bold(true)
+
+	commentBodyStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#9CA3AF"))
 )

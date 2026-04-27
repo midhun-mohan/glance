@@ -1,4 +1,4 @@
-module github.com/midhunmohan/mygit
+module github.com/midhun-mohan/glance
 
 go 1.26.2
 

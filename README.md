@@ -1,0 +1,183 @@
+# glance
+
+Your GitHub pull requests, at a glance.
+
+**glance** is a terminal dashboard that gives you a unified view of your GitHub pull requests across all your organizations. No more juggling browser tabs — review, comment, approve, and merge without leaving the terminal.
+
+## What it solves
+
+If you work across multiple GitHub organizations and repositories, keeping track of PRs is painful. glance puts everything in one place:
+
+- **Created by me** — your open PRs and their CI/review status
+- **Review requested** — PRs waiting for your review
+- **Assigned** — PRs assigned to you
+- **Mentions** — PRs where you're mentioned
+
+New PRs are highlighted with a red marker so you never miss what just came in. Desktop notifications alert you to new assignments, review requests, and mentions. You can drill into any PR to read diffs, view CI checks, leave comments, approve, request changes, or merge — all from the terminal.
+
+## Install
+
+### Quick install (macOS / Linux)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/midhun-mohan/glance/main/install.sh | sh
+```
+
+### Go install
+
+```bash
+go install github.com/midhun-mohan/glance/cmd/glance@latest
+```
+
+### Download binary
+
+Grab the latest binary for your platform from [GitHub Releases](https://github.com/midhun-mohan/glance/releases).
+
+### Build from source
+
+```bash
+git clone https://github.com/midhun-mohan/glance.git
+cd glance
+make build
+./bin/glance
+```
+
+## Prerequisites
+
+glance uses the [GitHub CLI](https://cli.github.com/) for authentication. Install it and log in:
+
+```bash
+# Install gh (macOS)
+brew install gh
+
+# Install gh (Linux)
+# See https://github.com/cli/cli/blob/trunk/docs/install_linux.md
+
+# Authenticate
+gh auth login
+```
+
+## Usage
+
+```bash
+glance
+```
+
+### Flags
+
+```
+-s, --section string     Start on a section (created|reviews|assigned|mentions)
+-o, --org string         Limit to specific org(s), comma-separated
+-r, --repo string        Limit to specific repo(s), comma-separated
+-f, --filter string      Apply a filter expression on startup
+-p, --preset string      Apply a saved filter preset
+    --refresh string     Override auto-refresh interval (e.g. "2m", "30s")
+    --no-notifications   Disable desktop notifications
+    --config             Open config file in $EDITOR
+```
+
+### Examples
+
+```bash
+# Show only review requests
+glance -s reviews
+
+# Limit to specific orgs
+glance -o mycompany,opensource-org
+
+# Start with a filter
+glance -f "repo:mycompany/api* status:open"
+
+# Faster refresh
+glance --refresh 1m
+```
+
+## Keybindings
+
+### Main view
+
+| Key | Action |
+|-----|--------|
+| `↑/k` `↓/j` | Navigate |
+| `←/h` `→/l` | Page |
+| `Tab` / `Shift+Tab` | Switch section |
+| `1-4` | Jump to section |
+| `Enter` | Open PR details |
+| `o` | Open PR in browser |
+| `y` | Copy PR URL |
+| `c` | Collapse/expand repo group |
+| `E` | Expand all groups |
+| `/` | Search / filter |
+| `p` | Filter presets |
+| `r` | Refresh |
+| `?` | Help |
+| `q` | Quit |
+
+### Detail view
+
+| Key | Action |
+|-----|--------|
+| `↑/↓` | Navigate files / scroll diff / navigate checks |
+| `Tab` | Switch between file list and diff/info panel |
+| `i` | Toggle between Diff and Info tab |
+| `c` | Comment (line comment in diff, general comment elsewhere) |
+| `o` | Open PR or CI check in browser |
+| `A` | Approve PR |
+| `X` | Request changes |
+| `M` | Merge PR (squash) |
+| `r` | Refresh |
+| `Esc` | Close detail view |
+
+### Filter expressions
+
+```
+repo:mycompany/*          # Wildcard repo match
+status:open               # PR status
+label:urgent              # Label filter
+created:<7d               # Created within last 7 days
+```
+
+Combine filters with spaces (AND logic): `repo:acme/* status:open label:bug`
+
+## Configuration
+
+Config file location: `~/.config/glance/config.yaml` (or `~/.glance.yaml`)
+
+Open it with `glance --config` or create it manually:
+
+```yaml
+orgs:
+  auto_detect: true
+  include: []       # Limit to these orgs (overrides auto_detect)
+  exclude: []       # Exclude these orgs from auto_detect
+
+refresh:
+  interval: "5m"
+
+notifications:
+  enabled: true
+  events:
+    new_assignment: true
+    review_requested: true
+    status_change: true
+    mentions: true
+
+# Named filter presets (use with 'p' key or --preset flag)
+presets:
+  urgent: "label:urgent status:open created:<7d"
+  my-team: "repo:mycompany/api* repo:mycompany/web*"
+```
+
+## Notifications
+
+glance sends desktop notifications when new PRs appear in your Review Requested, Assigned, or Mentions sections. Works on:
+
+- **macOS** — native notifications via osascript
+- **Linux** — via `notify-send` (libnotify)
+- **Windows** — PowerShell toast notifications (Windows 10+)
+
+Disable with `--no-notifications` or set `notifications.enabled: false` in config.
+
+## License
+
+MIT

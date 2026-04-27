@@ -3,7 +3,7 @@ package tui
 import (
 	"strings"
 
-	"github.com/midhunmohan/mygit/internal/github"
+	"github.com/midhun-mohan/glance/internal/github"
 	"github.com/sahilm/fuzzy"
 )
 

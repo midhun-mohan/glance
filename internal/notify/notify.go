@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"runtime"
 
-	"github.com/midhunmohan/mygit/internal/github"
+	"github.com/midhun-mohan/glance/internal/github"
 )
 
 type Notifier struct {
@@ -31,6 +31,8 @@ func New(enabled bool, events EventConfig) *Notifier {
 		backend = &macOSBackend{}
 	case "linux":
 		backend = &linuxBackend{}
+	case "windows":
+		backend = &windowsBackend{}
 	default:
 		backend = &noopBackend{}
 	}

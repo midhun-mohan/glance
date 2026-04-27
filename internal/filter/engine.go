@@ -4,7 +4,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/midhunmohan/mygit/internal/github"
+	"github.com/midhun-mohan/glance/internal/github"
 )
 
 func (fs FilterSet) IsEmpty() bool {

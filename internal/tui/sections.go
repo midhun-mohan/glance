@@ -2,7 +2,7 @@ package tui
 
 import (
 	"github.com/charmbracelet/lipgloss"
-	"github.com/midhunmohan/mygit/internal/github"
+	"github.com/midhun-mohan/glance/internal/github"
 )
 
 var sectionOrder = []github.Section{
@@ -19,14 +19,18 @@ var sectionLabels = map[github.Section]string{
 	github.SectionMentions:        "Mentions",
 }
 
-func renderTabs(active github.Section, counts map[github.Section]int, width int) string {
+func renderTabs(active github.Section, counts, unseenCounts map[github.Section]int, width int) string {
 	var tabParts []string
 	for _, s := range sectionOrder {
 		label := sectionLabels[s]
 		count := counts[s]
+		unseen := unseenCounts[s]
 		tabText := label
 		if count > 0 {
 			tabText = label + " (" + itoa(count) + ")"
+		}
+		if unseen > 0 {
+			tabText += " " + unseenDotStyle.Render(itoa(unseen) + " new")
 		}
 		if s == active {
 			tabParts = append(tabParts, activeTabStyle.Render(tabText))

@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
-	"github.com/midhunmohan/mygit/internal/github"
+	"github.com/midhun-mohan/glance/internal/github"
 )
 
 // Fixed column widths
@@ -55,7 +55,7 @@ func titleColWidth(totalWidth int) int {
 	return w
 }
 
-func renderPRList(items []displayItem, cursor int, width int, section github.Section) string {
+func renderPRList(items []displayItem, cursor int, width int, section github.Section, unseenPRs map[string]bool) string {
 	if len(items) == 0 {
 		return emptyStyle.Render("No pull requests in this section")
 	}
@@ -80,7 +80,8 @@ func renderPRList(items []displayItem, cursor int, width int, section github.Sec
 				lastRepo = item.pr.Repository
 				groupIndex++
 			}
-			row := renderPRRow(item.pr, tw, section)
+			isUnseen := unseenPRs[item.pr.URL]
+			row := renderPRRow(item.pr, tw, section, isUnseen)
 			if i == cursor {
 				rows = append(rows, padAndHighlight(row, width, selectedPRStyle))
 			} else {
@@ -190,7 +191,15 @@ func renderColumnHeader(tw int, section github.Section) string {
 	return header + "\n" + sep
 }
 
-func renderPRRow(pr github.PullRequest, tw int, section github.Section) string {
+func renderPRRow(pr github.PullRequest, tw int, section github.Section, isUnseen bool) string {
+	// Leading indicator: red bar for unseen, space otherwise
+	var lead string
+	if isUnseen {
+		lead = unseenDotStyle.Render("▎") + "  "
+	} else {
+		lead = "   "
+	}
+
 	st := getStatusIcon(pr.Status)
 	// Pad status icon cell to fixed width
 	stCell := lipgloss.NewStyle().Width(colStatus).Render(st)
@@ -222,8 +231,8 @@ func renderPRRow(pr github.PullRequest, tw int, section github.Section) string {
 	}
 	lastColCell := lipgloss.NewStyle().Width(colChecks).Render(lastColIcon)
 
-	return fmt.Sprintf("   %s %s %s %s %s %s %s",
-		stCell, numCell, titleCell, authorCell, ageCell, revCell, lastColCell)
+	return fmt.Sprintf("%s%s %s %s %s %s %s %s",
+		lead, stCell, numCell, titleCell, authorCell, ageCell, revCell, lastColCell)
 }
 
 func truncate(s string, max int) string {
@@ -244,7 +253,7 @@ func getStatusIcon(status github.PRStatus) string {
 	case github.PRStatusOpen:
 		return statusOpenStyle.Render("●")
 	case github.PRStatusDraft:
-		return statusDraftStyle.Render("◐")
+		return statusDraftStyle.Render("●")
 	case github.PRStatusMerged:
 		return statusMergedStyle.Render("●")
 	case github.PRStatusClosed:

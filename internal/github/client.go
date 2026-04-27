@@ -341,6 +341,7 @@ func (c *Client) FetchPRDetail(owner, repo string, number int) (*PRDetail, error
 				commits(last: 1) {
 					nodes {
 						commit {
+							oid
 							statusCheckRollup {
 								contexts(first: 50) {
 									nodes {
@@ -349,10 +350,12 @@ func (c *Client) FetchPRDetail(owner, repo string, number int) (*PRDetail, error
 											name
 											conclusion
 											status
+											detailsUrl
 										}
 										... on StatusContext {
 											context
 											state
+											targetUrl
 										}
 									}
 								}
@@ -413,6 +416,7 @@ func (c *Client) FetchPRDetail(owner, repo string, number int) (*PRDetail, error
 				Commits struct {
 					Nodes []struct {
 						Commit struct {
+							Oid               string `json:"oid"`
 							StatusCheckRollup *struct {
 								Contexts struct {
 									Nodes []struct {
@@ -420,8 +424,10 @@ func (c *Client) FetchPRDetail(owner, repo string, number int) (*PRDetail, error
 										Name       string `json:"name"`       // CheckRun
 										Conclusion string `json:"conclusion"` // CheckRun
 										Status     string `json:"status"`     // CheckRun
+										DetailsURL string `json:"detailsUrl"` // CheckRun
 										Context    string `json:"context"`    // StatusContext
 										State      string `json:"state"`      // StatusContext
+										TargetURL  string `json:"targetUrl"`  // StatusContext
 									} `json:"nodes"`
 								} `json:"contexts"`
 							} `json:"statusCheckRollup"`
@@ -464,6 +470,10 @@ func (c *Client) FetchPRDetail(owner, repo string, number int) (*PRDetail, error
 		Repository:     owner + "/" + repo,
 	}
 
+	if len(pr.Commits.Nodes) > 0 {
+		detail.HeadCommitSHA = pr.Commits.Nodes[0].Commit.Oid
+	}
+
 	if pr.Author != nil {
 		detail.Author = pr.Author.Login
 	}
@@ -503,9 +513,11 @@ func (c *Client) FetchPRDetail(owner, repo string, number int) (*PRDetail, error
 				if ctx.Typename == "CheckRun" {
 					check.Name = ctx.Name
 					check.Status = mapCheckRunStatus(ctx.Status, ctx.Conclusion)
+					check.URL = ctx.DetailsURL
 				} else if ctx.Typename == "StatusContext" {
 					check.Name = ctx.Context
 					check.Status = mapStatusContextState(ctx.State)
+					check.URL = ctx.TargetURL
 				} else {
 					continue
 				}
@@ -567,6 +579,135 @@ func (c *Client) FetchPRFiles(owner, repo string, number int) ([]ChangedFile, er
 		}
 	}
 	return files, nil
+}
+
+// FetchPRReviewComments fetches inline review comments for a PR via the REST API.
+func (c *Client) FetchPRReviewComments(owner, repo string, number int) ([]ReviewComment, error) {
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%d/comments?per_page=100", owner, repo, number)
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %w", err)
+	}
+	req.Header.Set("Authorization", "bearer "+c.token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("executing request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading response: %w", err)
+	}
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("GitHub API error: %s", resp.Status)
+	}
+
+	var raw []struct {
+		Body      string    `json:"body"`
+		Path      string    `json:"path"`
+		Line      *int      `json:"line"`
+		Side      string    `json:"side"`
+		CreatedAt time.Time `json:"created_at"`
+		User      *struct {
+			Login string `json:"login"`
+		} `json:"user"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, fmt.Errorf("parsing comments: %w", err)
+	}
+
+	var comments []ReviewComment
+	for _, r := range raw {
+		if r.Line == nil {
+			continue // skip outdated comments with no line mapping
+		}
+		author := ""
+		if r.User != nil {
+			author = r.User.Login
+		}
+		comments = append(comments, ReviewComment{
+			Author:    author,
+			Body:      r.Body,
+			Path:      r.Path,
+			Line:      *r.Line,
+			Side:      r.Side,
+			CreatedAt: r.CreatedAt,
+		})
+	}
+	return comments, nil
+}
+
+// CreateReviewComment creates a single inline review comment on a PR.
+// position is the 1-based line index in the diff (first @@ line = 1).
+func (c *Client) CreateReviewComment(owner, repo string, number int, commitSHA, path, body string, position int) error {
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%d/comments", owner, repo, number)
+
+	payload := map[string]interface{}{
+		"body":      body,
+		"commit_id": commitSHA,
+		"path":      path,
+		"position":  position,
+	}
+	jsonBody, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshaling comment: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", url, bytes.NewReader(jsonBody))
+	if err != nil {
+		return fmt.Errorf("creating request: %w", err)
+	}
+	req.Header.Set("Authorization", "bearer "+c.token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("executing request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("GitHub API error %d: %s", resp.StatusCode, string(respBody))
+	}
+	return nil
+}
+
+// CreatePRComment creates a general comment on a PR (not tied to a specific line).
+func (c *Client) CreatePRComment(owner, repo string, number int, body string) error {
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/issues/%d/comments", owner, repo, number)
+
+	payload := map[string]string{"body": body}
+	jsonBody, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshaling comment: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", url, bytes.NewReader(jsonBody))
+	if err != nil {
+		return fmt.Errorf("creating request: %w", err)
+	}
+	req.Header.Set("Authorization", "bearer "+c.token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("executing request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("GitHub API error %d: %s", resp.StatusCode, string(respBody))
+	}
+	return nil
 }
 
 func mapCheckRunStatus(status, conclusion string) CheckStatus {
