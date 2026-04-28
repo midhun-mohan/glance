@@ -132,7 +132,8 @@ func run(cmd *cobra.Command, args []string) error {
 
 	// Create client and model
 	client := github.NewClient(token)
-	model := tui.NewModel(cfg, client, startSection, flagFilter)
+	username, _ := client.GetUsername()
+	model := tui.NewModel(cfg, client, startSection, flagFilter, username)
 
 	// Run TUI
 	p := tea.NewProgram(model, tea.WithAltScreen())

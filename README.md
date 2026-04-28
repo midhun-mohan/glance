@@ -161,6 +161,7 @@ notifications:
     review_requested: true
     status_change: true
     mentions: true
+    include_team: false   # Set true to also notify for team-based assignments/reviews
 
 # Named filter presets (use with 'p' key or --preset flag)
 presets:

@@ -24,18 +24,20 @@ const (
 )
 
 type PullRequest struct {
-	Title        string
-	Repository   string
-	Author       string
-	Status       PRStatus
-	ReviewStatus ReviewStatus
-	ChecksState  string // SUCCESS, FAILURE, PENDING, or "" (no checks)
-	URL          string
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
-	Labels       []string
-	Number       int
-	IsDraft      bool
+	Title              string
+	Repository         string
+	Author             string
+	Status             PRStatus
+	ReviewStatus       ReviewStatus
+	ChecksState        string // SUCCESS, FAILURE, PENDING, or "" (no checks)
+	URL                string
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+	Labels             []string
+	Number             int
+	IsDraft            bool
+	Assignees          []string
+	RequestedReviewers []string
 }
 
 func (pr PullRequest) Age() string {
@@ -112,11 +114,18 @@ type ReviewEntry struct {
 	State  string // APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED
 }
 
+type PRComment struct {
+	Author    string
+	Body      string
+	CreatedAt time.Time
+}
+
 type ReviewComment struct {
 	Author    string
 	Body      string
 	Path      string
 	Line      int
+	Position  int    // 1-based position in the diff (0 if unavailable)
 	Side      string // "LEFT" or "RIGHT"
 	CreatedAt time.Time
 }
@@ -158,4 +167,5 @@ type PRDetail struct {
 	Checks         []CheckRun
 	Files          []ChangedFile
 	ReviewComments []ReviewComment
+	Comments       []PRComment
 }

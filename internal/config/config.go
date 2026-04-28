@@ -48,6 +48,7 @@ type NotificationEvents struct {
 	ReviewRequested bool `yaml:"review_requested"`
 	StatusChange    bool `yaml:"status_change"`
 	Mentions        bool `yaml:"mentions"`
+	IncludeTeam     bool `yaml:"include_team"` // notify for team-based assignments/reviews (default: false)
 }
 
 type UIConfig struct {

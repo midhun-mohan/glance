@@ -140,7 +140,7 @@ type countdownTickMsg time.Time
 
 var hourglassFrames = []string{"⏳", "⌛"}
 
-func NewModel(cfg config.Config, client *github.Client, startSection github.Section, filterExpr string) Model {
+func NewModel(cfg config.Config, client *github.Client, startSection github.Section, filterExpr string, username string) Model {
 	notifier := notify.New(
 		cfg.Notifications.Enabled,
 		notify.EventConfig{
@@ -148,7 +148,9 @@ func NewModel(cfg config.Config, client *github.Client, startSection github.Sect
 			ReviewRequested: cfg.Notifications.Events.ReviewRequested,
 			StatusChange:    cfg.Notifications.Events.StatusChange,
 			Mentions:        cfg.Notifications.Events.Mentions,
+			IncludeTeam:     cfg.Notifications.Events.IncludeTeam,
 		},
+		username,
 	)
 
 	m := Model{
@@ -1350,12 +1352,18 @@ func (m Model) fetchPRDetail(pr github.PullRequest) tea.Cmd {
 			detail.Files = files
 		}
 		// Fetch inline review comments
-		comments, err := m.client.FetchPRReviewComments(owner, repo, pr.Number)
+		reviewComments, err := m.client.FetchPRReviewComments(owner, repo, pr.Number)
 		if err != nil {
-			// Non-fatal: show detail without comments
 			detail.ReviewComments = nil
 		} else {
-			detail.ReviewComments = comments
+			detail.ReviewComments = reviewComments
+		}
+		// Fetch general PR comments
+		prComments, err := m.client.FetchPRComments(owner, repo, pr.Number)
+		if err != nil {
+			detail.Comments = nil
+		} else {
+			detail.Comments = prComments
 		}
 		return prDetailLoadedMsg{detail: *detail}
 	}

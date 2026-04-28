@@ -178,4 +178,9 @@ var (
 
 	commentBodyStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("#9CA3AF"))
+
+	commentBoxStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("#4B5563")).
+			Padding(0, 1)
 )

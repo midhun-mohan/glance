@@ -78,14 +78,46 @@ type commentKey struct {
 	side string
 }
 
-// buildCommentMap groups review comments by (path, line, side) for fast lookup.
-func buildCommentMap(comments []github.ReviewComment) map[commentKey][]github.ReviewComment {
-	m := make(map[commentKey][]github.ReviewComment)
-	for _, c := range comments {
-		k := commentKey{path: c.Path, line: c.Line, side: c.Side}
-		m[k] = append(m[k], c)
+// fileComments holds both position-indexed and line/side-indexed comments for a file.
+type fileComments struct {
+	byPosition map[int][]github.ReviewComment    // position (1-based diff index) -> comments
+	byLineSide map[commentKey][]github.ReviewComment // (path, line, side) -> comments
+}
+
+// buildFileComments builds lookup indexes for review comments on a specific file.
+func buildFileComments(comments []github.ReviewComment, path string) fileComments {
+	fc := fileComments{
+		byPosition: make(map[int][]github.ReviewComment),
+		byLineSide: make(map[commentKey][]github.ReviewComment),
 	}
-	return m
+	for _, c := range comments {
+		if c.Path != path {
+			continue
+		}
+		if c.Position > 0 {
+			fc.byPosition[c.Position] = append(fc.byPosition[c.Position], c)
+		} else if c.Line > 0 {
+			k := commentKey{path: c.Path, line: c.Line, side: c.Side}
+			fc.byLineSide[k] = append(fc.byLineSide[k], c)
+		}
+	}
+	return fc
+}
+
+// commentsForDiffLine returns review comments matching a diff line, checking
+// position first (most reliable), then falling back to line/side.
+func (fc fileComments) commentsForDiffLine(diffIndex int, meta diffLineInfo, path string) []github.ReviewComment {
+	// Position is 1-based, diffIndex is 0-based
+	if cs, ok := fc.byPosition[diffIndex+1]; ok {
+		return cs
+	}
+	if meta.commentable && meta.line > 0 {
+		k := commentKey{path: path, line: meta.line, side: meta.side}
+		if cs, ok := fc.byLineSide[k]; ok {
+			return cs
+		}
+	}
+	return nil
 }
 
 // renderDetailView renders the split-screen PR detail view.
@@ -363,7 +395,7 @@ func (m Model) renderDiffPanel(width, height int, d *github.PRDetail) string {
 	} else {
 		patchLines := strings.Split(f.Patch, "\n")
 		meta := parseDiffLinesMeta(f.Patch)
-		commentMap := buildCommentMap(d.ReviewComments)
+		fc := buildFileComments(d.ReviewComments, f.Filename)
 		isFocused := m.detailFocus == 1 && m.detailRightTab == 0
 
 		// Track which rendered line the cursor maps to (for auto-scroll)
@@ -387,12 +419,13 @@ func (m Model) renderDiffPanel(width, height int, d *github.PRDetail) string {
 			}
 
 			// Show existing review comments below matching diff lines
-			if i < len(meta) && meta[i].commentable {
-				k := commentKey{path: f.Filename, line: meta[i].line, side: meta[i].side}
-				if comments, ok := commentMap[k]; ok {
-					for _, c := range comments {
-						lines = append(lines, renderInlineComment(c, contentW)...)
-					}
+			var lineMeta diffLineInfo
+			if i < len(meta) {
+				lineMeta = meta[i]
+			}
+			if matched := fc.commentsForDiffLine(i, lineMeta, f.Filename); len(matched) > 0 {
+				for _, c := range matched {
+					lines = append(lines, renderInlineComment(c, contentW)...)
 				}
 			}
 		}
@@ -438,14 +471,28 @@ func (m Model) renderDiffPanel(width, height int, d *github.PRDetail) string {
 	return strings.Join(visible, "\n")
 }
 
-// renderInlineComment renders an existing review comment as an inline block.
+// renderInlineComment renders an existing review comment in a bordered box.
 func renderInlineComment(c github.ReviewComment, maxWidth int) []string {
-	var lines []string
+	boxW := maxWidth - 4 // indent from diff edge
+	if boxW < 14 {
+		boxW = 14
+	}
+	innerW := boxW - 4 // border (2) + padding (2)
+	if innerW < 10 {
+		innerW = 10
+	}
 	age := formatCommentAge(c.CreatedAt)
-	header := commentHeaderStyle.Render(fmt.Sprintf("  💬 @%s (%s)", c.Author, age))
-	lines = append(lines, header)
-	for _, wl := range wrapText(c.Body, maxWidth-4) {
-		lines = append(lines, commentBodyStyle.Render("  "+wl))
+	header := commentHeaderStyle.Render(fmt.Sprintf("💬 @%s (%s)", c.Author, age))
+	var bodyLines []string
+	bodyLines = append(bodyLines, header)
+	for _, wl := range wrapText(c.Body, innerW) {
+		bodyLines = append(bodyLines, commentBodyStyle.Render(wl))
+	}
+	content := strings.Join(bodyLines, "\n")
+	box := commentBoxStyle.Width(boxW).Render(content)
+	var lines []string
+	for _, bl := range strings.Split(box, "\n") {
+		lines = append(lines, "  "+bl)
 	}
 	return lines
 }
@@ -457,19 +504,23 @@ func renderCommentInput(input string, loading bool, maxWidth int) []string {
 		return []string{commentHeaderStyle.Render("  ⟳ Submitting comment...")}
 	}
 	var lines []string
-	inputW := maxWidth - 8 // account for indent + border + padding
-	if inputW < 10 {
-		inputW = 10
+	boxW := maxWidth - 4 // indent from diff edge
+	if boxW < 14 {
+		boxW = 14
+	}
+	innerW := boxW - 4 // border (2) + padding (2)
+	if innerW < 10 {
+		innerW = 10
 	}
 	text := input
-	if len(text) > inputW {
-		text = text[len(text)-inputW:]
+	if len(text) > innerW {
+		text = text[len(text)-innerW:]
 	}
 	enterKey := helpKeyStyle.Render("Enter")
 	escKey := helpKeyStyle.Render("Esc")
 	hints := enterKey + " submit  •  " + escKey + " cancel"
-	content := text + "█\n" + strings.Repeat("─", inputW) + "\n" + hints
-	box := confirmInputStyle.Width(inputW).Render(content)
+	content := text + "█\n" + strings.Repeat("─", innerW) + "\n" + hints
+	box := confirmInputStyle.Width(boxW).Render(content)
 	// Split bordered box into separate lines for proper scroll accounting
 	for _, bl := range strings.Split(box, "\n") {
 		lines = append(lines, "  "+bl)
@@ -544,6 +595,23 @@ func (m Model) renderInfoPanel(width, height int, d *github.PRDetail) string {
 			name := lipgloss.NewStyle().Width(16).Render(r.Author)
 			state := detailBodyStyle.Render(r.State)
 			lines = append(lines, icon+" "+name+" "+state)
+		}
+	}
+
+	// Comments
+	if len(d.Comments) > 0 {
+		lines = append(lines, "")
+		lines = append(lines, detailSectionStyle.Render(
+			fmt.Sprintf("Comments (%d)", len(d.Comments))))
+		for _, c := range d.Comments {
+			age := formatCommentAge(c.CreatedAt)
+			header := commentHeaderStyle.Render(
+				fmt.Sprintf("  @%s (%s)", c.Author, age))
+			lines = append(lines, header)
+			for _, wl := range wrapText(c.Body, contentW-4) {
+				lines = append(lines, commentBodyStyle.Render("  "+wl))
+			}
+			lines = append(lines, "") // blank line between comments
 		}
 	}
 

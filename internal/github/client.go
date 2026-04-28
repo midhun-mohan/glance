@@ -203,6 +203,16 @@ func (c *Client) searchPRs(searchQuery string) ([]PullRequest, error) {
 							name
 						}
 					}
+					assignees(first: 10) {
+						nodes { login }
+					}
+					reviewRequests(first: 10) {
+						nodes {
+							requestedReviewer {
+								... on User { login }
+							}
+						}
+					}
 					reviewDecision
 					commits(last: 1) {
 						nodes {
@@ -239,6 +249,18 @@ func (c *Client) searchPRs(searchQuery string) ([]PullRequest, error) {
 						Name string `json:"name"`
 					} `json:"nodes"`
 				} `json:"labels"`
+				Assignees struct {
+					Nodes []struct {
+						Login string `json:"login"`
+					} `json:"nodes"`
+				} `json:"assignees"`
+				ReviewRequests struct {
+					Nodes []struct {
+						RequestedReviewer struct {
+							Login string `json:"login"`
+						} `json:"requestedReviewer"`
+					} `json:"nodes"`
+				} `json:"reviewRequests"`
 				ReviewDecision string `json:"reviewDecision"`
 				Commits        struct {
 					Nodes []struct {
@@ -278,19 +300,31 @@ func (c *Client) searchPRs(searchQuery string) ([]PullRequest, error) {
 				checksState = rollup.State
 			}
 		}
+		assignees := make([]string, len(node.Assignees.Nodes))
+		for i, a := range node.Assignees.Nodes {
+			assignees[i] = a.Login
+		}
+		var reviewers []string
+		for _, rr := range node.ReviewRequests.Nodes {
+			if rr.RequestedReviewer.Login != "" {
+				reviewers = append(reviewers, rr.RequestedReviewer.Login)
+			}
+		}
 		pr := PullRequest{
-			Title:        node.Title,
-			Number:       node.Number,
-			Repository:   node.Repository.NameWithOwner,
-			Author:       author,
-			URL:          node.URL,
-			CreatedAt:    node.CreatedAt,
-			UpdatedAt:    node.UpdatedAt,
-			IsDraft:      node.IsDraft,
-			Labels:       labels,
-			Status:       mapPRStatus(node.State, node.IsDraft),
-			ReviewStatus: mapReviewStatus(node.ReviewDecision),
-			ChecksState:  checksState,
+			Title:              node.Title,
+			Number:             node.Number,
+			Repository:         node.Repository.NameWithOwner,
+			Author:             author,
+			URL:                node.URL,
+			CreatedAt:          node.CreatedAt,
+			UpdatedAt:          node.UpdatedAt,
+			IsDraft:            node.IsDraft,
+			Labels:             labels,
+			Status:             mapPRStatus(node.State, node.IsDraft),
+			ReviewStatus:       mapReviewStatus(node.ReviewDecision),
+			ChecksState:        checksState,
+			Assignees:          assignees,
+			RequestedReviewers: reviewers,
 		}
 		prs = append(prs, pr)
 	}
@@ -611,6 +645,7 @@ func (c *Client) FetchPRReviewComments(owner, repo string, number int) ([]Review
 		Body      string    `json:"body"`
 		Path      string    `json:"path"`
 		Line      *int      `json:"line"`
+		Position  *int      `json:"position"`
 		Side      string    `json:"side"`
 		CreatedAt time.Time `json:"created_at"`
 		User      *struct {
@@ -623,21 +658,28 @@ func (c *Client) FetchPRReviewComments(owner, repo string, number int) ([]Review
 
 	var comments []ReviewComment
 	for _, r := range raw {
-		if r.Line == nil {
-			continue // skip outdated comments with no line mapping
+		// Skip comments with neither line nor position (fully outdated)
+		if r.Line == nil && r.Position == nil {
+			continue
 		}
 		author := ""
 		if r.User != nil {
 			author = r.User.Login
 		}
-		comments = append(comments, ReviewComment{
+		c := ReviewComment{
 			Author:    author,
 			Body:      r.Body,
 			Path:      r.Path,
-			Line:      *r.Line,
 			Side:      r.Side,
 			CreatedAt: r.CreatedAt,
-		})
+		}
+		if r.Line != nil {
+			c.Line = *r.Line
+		}
+		if r.Position != nil {
+			c.Position = *r.Position
+		}
+		comments = append(comments, c)
 	}
 	return comments, nil
 }
@@ -677,6 +719,58 @@ func (c *Client) CreateReviewComment(owner, repo string, number int, commitSHA, 
 		return fmt.Errorf("GitHub API error %d: %s", resp.StatusCode, string(respBody))
 	}
 	return nil
+}
+
+// FetchPRComments fetches general (non-review) comments on a PR via the REST API.
+func (c *Client) FetchPRComments(owner, repo string, number int) ([]PRComment, error) {
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/issues/%d/comments?per_page=100", owner, repo, number)
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %w", err)
+	}
+	req.Header.Set("Authorization", "bearer "+c.token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("executing request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading response: %w", err)
+	}
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("GitHub API error: %s", resp.Status)
+	}
+
+	var raw []struct {
+		Body      string    `json:"body"`
+		CreatedAt time.Time `json:"created_at"`
+		User      *struct {
+			Login string `json:"login"`
+		} `json:"user"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, fmt.Errorf("parsing comments: %w", err)
+	}
+
+	var comments []PRComment
+	for _, r := range raw {
+		author := ""
+		if r.User != nil {
+			author = r.User.Login
+		}
+		comments = append(comments, PRComment{
+			Author:    author,
+			Body:      r.Body,
+			CreatedAt: r.CreatedAt,
+		})
+	}
+	return comments, nil
 }
 
 // CreatePRComment creates a general comment on a PR (not tied to a specific line).
