@@ -3,7 +3,9 @@ package tui
 import (
 	"fmt"
 	"os/exec"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,8 +20,8 @@ import (
 )
 
 const (
-	minPageSize     = 3
-	defaultPageSize = 15
+	minPageSize    = 3
+	maxPRsPerRepo  = 10
 	// Column header (# Title Author Age R + separator) shown once at top
 	linesColumnHeader     = 2
 	// Each expanded repo group: just the repo name line
@@ -59,7 +61,8 @@ type Model struct {
 	presetCursor  int
 
 	// Collapsible repo groups
-	collapsedRepos map[string]bool
+	collapsedRepos     map[string]bool
+	expandedRepoLimit  map[string]int // per-repo PR display limit (default maxPRsPerRepo)
 
 	// Detail view (split-screen: left=files, right=diff/info)
 	showDetail     bool
@@ -86,6 +89,12 @@ type Model struct {
 	refreshInterval time.Duration
 	hourglassFrame int
 	err            error
+
+	// Browse PR dialog
+	browseMode     bool
+	browseInput    string
+	browseError    string
+	browsePending  bool // a browse-initiated detail fetch is in progress
 
 	// Confirmation dialog (approve/reject/merge)
 	confirmMode    string          // "", "approve", "reject", "merge"
@@ -160,13 +169,15 @@ func NewModel(cfg config.Config, client *github.Client, startSection github.Sect
 		presets:         filter.NewPresetManager(cfg.Presets),
 		activeSection:   startSection,
 		refreshInterval: cfg.Refresh.IntervalDuration(),
-		collapsedRepos:  make(map[string]bool),
-		unseenPRs:       make(map[string]bool),
+		collapsedRepos:    make(map[string]bool),
+		expandedRepoLimit: make(map[string]int),
+		unseenPRs:        make(map[string]bool),
 		prs: github.PRsBySection{
 			github.SectionCreated:         {},
 			github.SectionReviewRequested: {},
 			github.SectionAssigned:        {},
 			github.SectionMentions:        {},
+			github.SectionBrowse:          {},
 		},
 		loading:   true,
 		firstLoad: true,
@@ -203,8 +214,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.fetchPRs()
 
 	case prsLoadedMsg:
+		browsePRs := m.prs[github.SectionBrowse] // preserve across refresh
 		oldPRs := m.prs
 		m.prs = msg.prs
+		m.prs[github.SectionBrowse] = browsePRs
 		m.loading = false
 		m.lastRefresh = time.Now()
 		m.err = nil
@@ -231,6 +244,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case prDetailLoadedMsg:
 		m.detailLoading = false
 		m.detailData = &msg.detail
+		if m.browsePending {
+			m.browsePending = false
+			pr := github.PRFromDetail(&msg.detail)
+			// Add to browse section if not already present
+			found := false
+			for _, existing := range m.prs[github.SectionBrowse] {
+				if existing.URL == pr.URL {
+					found = true
+					break
+				}
+			}
+			if !found {
+				m.prs[github.SectionBrowse] = append(m.prs[github.SectionBrowse], pr)
+			}
+		}
 		return m, nil
 
 	case prDetailErrorMsg:
@@ -327,6 +355,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleDetailKey(msg)
 	}
 
+	// Browse PR mode
+	if m.browseMode {
+		return m.handleBrowseKey(msg)
+	}
+
 	// Search mode
 	if m.searchMode {
 		return m.handleSearchKey(msg)
@@ -355,6 +388,24 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "left", "h":
+		ps := m.currentPageSize()
+		items, _ := m.pagedDisplayItems(ps)
+		// If cursor is on a "more" row and the repo is expanded, collapse by one batch
+		if m.cursor >= 0 && m.cursor < len(items) && items[m.cursor].isMore {
+			repo := items[m.cursor].repoName
+			current := m.repoDisplayLimit(repo)
+			if current > maxPRsPerRepo {
+				newLimit := current - maxPRsPerRepo
+				if newLimit <= maxPRsPerRepo {
+					delete(m.expandedRepoLimit, repo)
+				} else {
+					m.expandedRepoLimit[repo] = newLimit
+				}
+				m.setCursorToRepoTail(repo)
+				return m, nil
+			}
+		}
+		// Otherwise, page backward
 		if m.page > 0 {
 			m.page--
 			m.cursor = 0
@@ -362,6 +413,15 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "right", "l":
 		ps := m.currentPageSize()
+		items, _ := m.pagedDisplayItems(ps)
+		// If cursor is on a "more" row, expand to show the next batch
+		if m.cursor >= 0 && m.cursor < len(items) && items[m.cursor].isMore {
+			repo := items[m.cursor].repoName
+			m.expandedRepoLimit[repo] = m.repoDisplayLimit(repo) + maxPRsPerRepo
+			m.setCursorToRepoTail(repo)
+			return m, nil
+		}
+		// Otherwise, page forward
 		total := len(m.allDisplayItems())
 		if (m.page+1)*ps < total {
 			m.page++
@@ -378,7 +438,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.cursor = 0
 		m.page = 0
 		return m, nil
-	case "1", "2", "3", "4":
+	case "1", "2", "3", "4", "5":
 		n := int(msg.String()[0] - '0')
 		if s, ok := sectionByNumber(n); ok {
 			m.activeSection = s
@@ -389,24 +449,32 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		ps := m.currentPageSize()
 		items, _ := m.pagedDisplayItems(ps)
-		if m.cursor >= 0 && m.cursor < len(items) && items[m.cursor].isPR {
-			delete(m.unseenPRs, items[m.cursor].pr.URL)
-			m.showDetail = true
-			m.detailLoading = true
-			m.detailData = nil
-			m.detailError = nil
-			m.detailFocus = 0
-			m.detailRightTab = 0
-			m.fileCursor = 0
-			m.fileListScroll = 0
-			m.diffScroll = 0
-			m.infoScroll = 0
-			m.checkCursor = 0
-			m.checkNoURL = false
-			m.diffCursor = 0
-			m.commentMode = false
-			m.commentInput = ""
-			return m, m.fetchPRDetail(items[m.cursor].pr)
+		if m.cursor >= 0 && m.cursor < len(items) {
+			item := items[m.cursor]
+			if item.isPR {
+				delete(m.unseenPRs, item.pr.URL)
+				m.showDetail = true
+				m.detailLoading = true
+				m.detailData = nil
+				m.detailError = nil
+				m.detailFocus = 0
+				m.detailRightTab = 0
+				m.fileCursor = 0
+				m.fileListScroll = 0
+				m.diffScroll = 0
+				m.infoScroll = 0
+				m.checkCursor = 0
+				m.checkNoURL = false
+				m.diffCursor = 0
+				m.commentMode = false
+				m.commentInput = ""
+				return m, m.fetchPRDetail(item.pr)
+			} else if item.isMore {
+				repo := item.repoName
+				m.expandedRepoLimit[repo] = m.repoDisplayLimit(repo) + maxPRsPerRepo
+				m.setCursorToRepoTail(repo)
+				return m, nil
+			}
 		}
 		return m, nil
 	case "o":
@@ -453,6 +521,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			} else {
 				m.collapsedRepos[repo] = true
 			}
+			delete(m.expandedRepoLimit, repo) // reset to default limit
 		}
 		return m, nil
 	case "E":
@@ -469,6 +538,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.showPresets = true
 			m.presetCursor = 0
 		}
+		return m, nil
+	case "B":
+		m.browseMode = true
+		m.browseInput = ""
+		m.browseError = ""
 		return m, nil
 	case "M":
 		if m.activeSection == github.SectionCreated {
@@ -527,6 +601,95 @@ func (m Model) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+}
+
+func (m Model) handleBrowseKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Handle paste: use raw runes (msg.String() wraps pastes in [...])
+	if msg.Paste {
+		m.browseInput += string(msg.Runes)
+		m.browseError = ""
+		return m, nil
+	}
+
+	switch msg.String() {
+	case "esc":
+		m.browseMode = false
+		m.browseInput = ""
+		m.browseError = ""
+		return m, nil
+	case "enter":
+		owner, repo, number, err := parsePRReference(m.browseInput)
+		if err != nil {
+			m.browseError = err.Error()
+			return m, nil
+		}
+		m.browseMode = false
+		m.browseInput = ""
+		m.browseError = ""
+		m.browsePending = true
+		m.showDetail = true
+		m.detailLoading = true
+		m.detailData = nil
+		m.detailError = nil
+		m.detailFocus = 0
+		m.detailRightTab = 0
+		m.fileCursor = 0
+		m.fileListScroll = 0
+		m.diffScroll = 0
+		m.infoScroll = 0
+		m.checkCursor = 0
+		m.checkNoURL = false
+		m.diffCursor = 0
+		m.commentMode = false
+		m.commentInput = ""
+		pr := github.PullRequest{
+			Repository: owner + "/" + repo,
+			Number:     number,
+		}
+		return m, m.fetchPRDetail(pr)
+	case "backspace":
+		if len(m.browseInput) > 0 {
+			m.browseInput = m.browseInput[:len(m.browseInput)-1]
+		}
+		m.browseError = ""
+		return m, nil
+	case "left":
+		// no-op: cursor movement not supported, but don't insert the char
+		return m, nil
+	case "right":
+		return m, nil
+	default:
+		if len(msg.String()) == 1 {
+			m.browseInput += msg.String()
+			m.browseError = ""
+		}
+		return m, nil
+	}
+}
+
+// parsePRReference parses a PR reference in the form "owner/repo#123" or a
+// GitHub URL like "https://github.com/owner/repo/pull/123".
+func parsePRReference(input string) (owner, repo string, number int, err error) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return "", "", 0, fmt.Errorf("empty input")
+	}
+
+	// Try URL: https://github.com/owner/repo/pull/123
+	urlRe := regexp.MustCompile(`github\.com/([^/]+)/([^/]+)/pull/(\d+)`)
+	if m := urlRe.FindStringSubmatch(input); m != nil {
+		n, _ := strconv.Atoi(m[3])
+		return m[1], m[2], n, nil
+	}
+
+	// Try short form: owner/repo#123
+	shortRe := regexp.MustCompile(`^([^/]+)/([^#]+)#(\d+)$`)
+	if m := shortRe.FindStringSubmatch(input); m != nil {
+		n, _ := strconv.Atoi(m[3])
+		return m[1], m[2], n, nil
+	}
+
+	return "", "", 0, fmt.Errorf("use owner/repo#123 or GitHub URL")
 }
 
 func (m Model) handlePresetKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -925,6 +1088,37 @@ func (m Model) filteredPRs() []github.PullRequest {
 	return prs
 }
 
+// repoDisplayLimit returns how many PRs to show for a repo (default maxPRsPerRepo).
+func (m Model) repoDisplayLimit(repo string) int {
+	if limit, ok := m.expandedRepoLimit[repo]; ok {
+		return limit
+	}
+	return maxPRsPerRepo
+}
+
+// setCursorToRepoTail positions the cursor on the "… and N more" row for the
+// given repo, or on the last PR of that repo if all PRs are shown.
+// It also adjusts m.page so the target item is on the visible page.
+func (m *Model) setCursorToRepoTail(repo string) {
+	all := m.allDisplayItems()
+	targetIdx := -1
+	for i, item := range all {
+		if item.isMore && item.repoName == repo {
+			targetIdx = i
+			break
+		}
+		if item.isPR && item.pr.Repository == repo {
+			targetIdx = i // last PR of this repo as fallback
+		}
+	}
+	if targetIdx < 0 {
+		return
+	}
+	ps := m.currentPageSize()
+	m.page = targetIdx / ps
+	m.cursor = targetIdx % ps
+}
+
 // allDisplayItems returns a flat list of navigable items: PR rows for expanded
 // groups and collapsed-header items for collapsed groups, in sorted repo order.
 func (m Model) allDisplayItems() []displayItem {
@@ -953,8 +1147,20 @@ func (m Model) allDisplayItems() []displayItem {
 				count:    len(g.prs),
 			})
 		} else {
-			for _, pr := range g.prs {
+			displayLimit := m.repoDisplayLimit(g.name)
+			limit := len(g.prs)
+			if limit > displayLimit {
+				limit = displayLimit
+			}
+			for _, pr := range g.prs[:limit] {
 				items = append(items, displayItem{isPR: true, pr: pr})
+			}
+			if len(g.prs) > limit {
+				items = append(items, displayItem{
+					isMore:   true,
+					repoName: g.name,
+					count:    len(g.prs) - limit,
+				})
 			}
 		}
 	}
@@ -975,61 +1181,11 @@ func (m Model) pagedDisplayItems(ps int) (page []displayItem, total int) {
 	return all[start:end], total
 }
 
-// calcDisplayPageSize determines how many display items fit in the given available height.
-// It iteratively accounts for the group headers and blank separators.
-func calcDisplayPageSize(availableLines int, allItems []displayItem, startIndex int) int {
-	if availableLines <= 0 || len(allItems) == 0 {
-		return minPageSize
-	}
 
-	candidate := availableLines
-	if candidate > len(allItems)-startIndex {
-		candidate = len(allItems) - startIndex
-	}
-
-	for i := 0; i < 5; i++ {
-		end := startIndex + candidate
-		if end > len(allItems) {
-			end = len(allItems)
-		}
-		slice := allItems[startIndex:end]
-		overhead := countDisplayItemOverhead(slice)
-		newCandidate := availableLines - overhead
-		if newCandidate < minPageSize {
-			newCandidate = minPageSize
-		}
-		if newCandidate > len(allItems)-startIndex {
-			newCandidate = len(allItems) - startIndex
-		}
-		if newCandidate == candidate {
-			break
-		}
-		candidate = newCandidate
-	}
-
-	if candidate < minPageSize {
-		candidate = minPageSize
-	}
-	return candidate
-}
-
-func (m Model) effectivePageSize(availableLines int) int {
-	all := m.allDisplayItems()
-	roughPS := availableLines - 2*linesPerRepoHeader
-	if roughPS < minPageSize {
-		roughPS = minPageSize
-	}
-	startIndex := m.page * roughPS
-	if startIndex >= len(all) {
-		startIndex = 0
-	}
-	return calcDisplayPageSize(availableLines, all, startIndex)
-}
-
-// currentPageSize computes the dynamic page size based on the current terminal dimensions.
+// currentPageSize computes how many display items fit in the available terminal height.
 func (m Model) currentPageSize() int {
 	if m.height == 0 || m.width == 0 {
-		return defaultPageSize
+		return 20
 	}
 	innerHeight := m.height - 2
 	chromeLines := 5
@@ -1039,15 +1195,54 @@ func (m Model) currentPageSize() int {
 	if m.err != nil {
 		chromeLines++
 	}
-	available := innerHeight - chromeLines
-
-	// Column header shown once at top of PR list
-	available -= linesColumnHeader
-
+	available := innerHeight - chromeLines - linesColumnHeader - 2 // 2 = status bar + page info
 	if available < minPageSize {
 		available = minPageSize
 	}
-	return m.effectivePageSize(available)
+
+	// Walk forward from start, counting visual lines consumed,
+	// to determine how many items fit in the available space.
+	all := m.allDisplayItems()
+	if len(all) == 0 {
+		return minPageSize
+	}
+
+	linesUsed := 0
+	count := 0
+	lastRepo := ""
+	groupIndex := 0
+
+	for i := 0; i < len(all); i++ {
+		item := all[i]
+		repo := item.repoName
+		if item.isPR {
+			repo = item.pr.Repository
+		}
+
+		extraLines := 0
+		if repo != lastRepo {
+			if groupIndex > 0 {
+				extraLines++ // blank separator between groups
+			}
+			if item.isPR {
+				extraLines++ // repo header line
+			}
+			lastRepo = repo
+			groupIndex++
+		}
+
+		if linesUsed+extraLines+1 > available && count > 0 {
+			break
+		}
+
+		linesUsed += extraLines + 1
+		count++
+	}
+
+	if count < minPageSize {
+		count = minPageSize
+	}
+	return count
 }
 
 func totalPages(count, ps int) int {
@@ -1075,6 +1270,11 @@ func (m Model) View() string {
 	// Detail view overlay
 	if m.showDetail {
 		return m.renderDetailView()
+	}
+
+	// Browse PR dialog overlay
+	if m.browseMode {
+		return m.renderBrowseDialog()
 	}
 
 	// Preset picker overlay (full screen, no box)
@@ -1154,8 +1354,8 @@ func (m Model) View() string {
 		availableListHeight = minPageSize
 	}
 
-	// --- Dynamic paging based on available height ---
-	ps := m.effectivePageSize(availableListHeight)
+	// --- Paging ---
+	ps := m.currentPageSize()
 	items, total := m.pagedDisplayItems(ps)
 	pages := totalPages(total, ps)
 
@@ -1237,6 +1437,30 @@ func (m Model) renderPresetPicker() string {
 
 	content := strings.Join(lines, "\n")
 	overlay := helpOverlayStyle.Render(content)
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, overlay)
+}
+
+func (m Model) renderBrowseDialog() string {
+	var lines []string
+
+	title := lipgloss.NewStyle().Bold(true).Foreground(secondaryColor).Render("Browse PR")
+	lines = append(lines, title)
+	lines = append(lines, "")
+	lines = append(lines, helpDescStyle.Render("Enter owner/repo#number or GitHub URL:"))
+	inputBox := confirmInputStyle.Width(40).Render(m.browseInput + "█")
+	lines = append(lines, inputBox)
+
+	if m.browseError != "" {
+		lines = append(lines, lipgloss.NewStyle().Foreground(dangerColor).Render(m.browseError))
+	}
+
+	lines = append(lines, "")
+	enterKey := helpKeyStyle.Render("Enter")
+	escKey := helpKeyStyle.Render("Esc")
+	lines = append(lines, enterKey+" open  •  "+escKey+" cancel")
+
+	content := strings.Join(lines, "\n")
+	overlay := helpOverlayStyle.Width(46).Render(content)
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, overlay)
 }
 

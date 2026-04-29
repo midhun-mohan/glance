@@ -71,6 +71,7 @@ const (
 	SectionReviewRequested
 	SectionAssigned
 	SectionMentions
+	SectionBrowse
 )
 
 func (s Section) String() string {
@@ -83,8 +84,74 @@ func (s Section) String() string {
 		return "Assigned to me"
 	case SectionMentions:
 		return "Mentions"
+	case SectionBrowse:
+		return "Browse"
 	default:
 		return "Unknown"
+	}
+}
+
+// PRFromDetail converts a PRDetail into a PullRequest summary.
+func PRFromDetail(d *PRDetail) PullRequest {
+	status := PRStatusOpen
+	if d.IsDraft {
+		status = PRStatusDraft
+	}
+	switch d.State {
+	case "MERGED":
+		status = PRStatusMerged
+	case "CLOSED":
+		status = PRStatusClosed
+	}
+
+	var reviewStatus ReviewStatus
+	switch d.ReviewDecision {
+	case "APPROVED":
+		reviewStatus = ReviewApproved
+	case "CHANGES_REQUESTED":
+		reviewStatus = ReviewChangesReq
+	case "REVIEW_REQUIRED":
+		reviewStatus = ReviewRequired
+	default:
+		reviewStatus = ReviewPending
+	}
+
+	checksState := ""
+	if len(d.Checks) > 0 {
+		allSuccess := true
+		anyFailure := false
+		for _, ch := range d.Checks {
+			if ch.Status != CheckSuccess && ch.Status != CheckSkipped && ch.Status != CheckNeutral {
+				allSuccess = false
+			}
+			if ch.Status == CheckFailure {
+				anyFailure = true
+			}
+		}
+		switch {
+		case anyFailure:
+			checksState = "FAILURE"
+		case allSuccess:
+			checksState = "SUCCESS"
+		default:
+			checksState = "PENDING"
+		}
+	}
+
+	return PullRequest{
+		Title:        d.Title,
+		Repository:   d.Repository,
+		Author:       d.Author,
+		Status:       status,
+		ReviewStatus: reviewStatus,
+		ChecksState:  checksState,
+		URL:          d.URL,
+		CreatedAt:    d.CreatedAt,
+		UpdatedAt:    d.UpdatedAt,
+		Labels:       d.Labels,
+		Number:       d.Number,
+		IsDraft:      d.IsDraft,
+		Assignees:    d.Assignees,
 	}
 }
 

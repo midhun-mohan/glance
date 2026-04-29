@@ -10,6 +10,7 @@ var sectionOrder = []github.Section{
 	github.SectionReviewRequested,
 	github.SectionAssigned,
 	github.SectionMentions,
+	github.SectionBrowse,
 }
 
 var sectionLabels = map[github.Section]string{
@@ -17,6 +18,7 @@ var sectionLabels = map[github.Section]string{
 	github.SectionReviewRequested: "Review requested",
 	github.SectionAssigned:        "Assigned",
 	github.SectionMentions:        "Mentions",
+	github.SectionBrowse:          "Browse",
 }
 
 func renderTabs(active github.Section, counts, unseenCounts map[github.Section]int, width int) string {

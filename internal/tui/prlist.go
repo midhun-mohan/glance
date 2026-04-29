@@ -38,12 +38,14 @@ var (
 		Bold(true)
 )
 
-// displayItem represents a navigable item in the PR list: either a PR row or a collapsed group header.
+// displayItem represents a navigable item in the PR list: a PR row, a collapsed group header,
+// or a "+N more" indicator for repos with more than maxPRsPerRepo PRs.
 type displayItem struct {
 	isPR     bool
 	pr       github.PullRequest // valid when isPR
-	repoName string             // valid when !isPR (collapsed header)
+	repoName string             // valid when !isPR (collapsed header or isMore)
 	count    int                // valid when !isPR
+	isMore   bool               // "+N more" indicator for truncated repo groups
 }
 
 func titleColWidth(totalWidth int) int {
@@ -86,6 +88,14 @@ func renderPRList(items []displayItem, cursor int, width int, section github.Sec
 				rows = append(rows, padAndHighlight(row, width, selectedPRStyle))
 			} else {
 				rows = append(rows, normalPRStyle.Render(row))
+			}
+		} else if item.isMore {
+			// "+N more" indicator (stays in current repo group, no separator)
+			moreText := fmt.Sprintf("   … and %d more", item.count)
+			if i == cursor {
+				rows = append(rows, padAndHighlight(moreText, width, selectedPRStyle))
+			} else {
+				rows = append(rows, ageStyle.Render(moreText))
 			}
 		} else {
 			// Collapsed group header

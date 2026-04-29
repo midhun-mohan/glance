@@ -8,3 +8,8 @@ dist/
 *.out
 .DS_Store
 specs/
+bugs.md
+*.png
+*.jpg
+*.jpeg
+*.gif

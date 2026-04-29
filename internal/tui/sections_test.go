@@ -14,7 +14,8 @@ func TestNextSection(t *testing.T) {
 		{github.SectionCreated, github.SectionReviewRequested},
 		{github.SectionReviewRequested, github.SectionAssigned},
 		{github.SectionAssigned, github.SectionMentions},
-		{github.SectionMentions, github.SectionCreated}, // wraps around
+		{github.SectionMentions, github.SectionBrowse},
+		{github.SectionBrowse, github.SectionCreated}, // wraps around
 	}
 
 	for _, tt := range tests {
@@ -30,10 +31,11 @@ func TestPrevSection(t *testing.T) {
 		current github.Section
 		want    github.Section
 	}{
-		{github.SectionCreated, github.SectionMentions}, // wraps around
+		{github.SectionCreated, github.SectionBrowse}, // wraps around
 		{github.SectionReviewRequested, github.SectionCreated},
 		{github.SectionAssigned, github.SectionReviewRequested},
 		{github.SectionMentions, github.SectionAssigned},
+		{github.SectionBrowse, github.SectionMentions},
 	}
 
 	for _, tt := range tests {
@@ -54,8 +56,9 @@ func TestSectionByNumber(t *testing.T) {
 		{2, github.SectionReviewRequested, true},
 		{3, github.SectionAssigned, true},
 		{4, github.SectionMentions, true},
+		{5, github.SectionBrowse, true},
 		{0, 0, false},
-		{5, 0, false},
+		{6, 0, false},
 		{-1, 0, false},
 	}
 

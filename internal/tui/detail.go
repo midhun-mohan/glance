@@ -486,7 +486,7 @@ func renderInlineComment(c github.ReviewComment, maxWidth int) []string {
 	var bodyLines []string
 	bodyLines = append(bodyLines, header)
 	for _, wl := range wrapText(c.Body, innerW) {
-		bodyLines = append(bodyLines, commentBodyStyle.Render(wl))
+		bodyLines = append(bodyLines, styleCommentLine(wl))
 	}
 	content := strings.Join(bodyLines, "\n")
 	box := commentBoxStyle.Width(boxW).Render(content)
@@ -609,7 +609,7 @@ func (m Model) renderInfoPanel(width, height int, d *github.PRDetail) string {
 				fmt.Sprintf("  @%s (%s)", c.Author, age))
 			lines = append(lines, header)
 			for _, wl := range wrapText(c.Body, contentW-4) {
-				lines = append(lines, commentBodyStyle.Render("  "+wl))
+				lines = append(lines, "  "+styleCommentLine(wl))
 			}
 			lines = append(lines, "") // blank line between comments
 		}
@@ -801,6 +801,25 @@ func styleDiffLine(line string) string {
 		return diffDelStyle.Render(line)
 	default:
 		return diffContextStyle.Render(line)
+	}
+}
+
+// styleCommentLine applies diff-style colors to comment body lines that look
+// like diff content (e.g. lines starting with +, -, @@, diff, etc.).
+func styleCommentLine(line string) string {
+	switch {
+	case strings.HasPrefix(line, "@@"):
+		return diffHunkStyle.Render(line)
+	case strings.HasPrefix(line, "diff "):
+		return diffHunkStyle.Render(line)
+	case strings.HasPrefix(line, "+++"), strings.HasPrefix(line, "---"):
+		return diffHunkStyle.Render(line)
+	case strings.HasPrefix(line, "+"):
+		return diffAddStyle.Render(line)
+	case strings.HasPrefix(line, "-"):
+		return diffDelStyle.Render(line)
+	default:
+		return commentBodyStyle.Render(line)
 	}
 }
 
