@@ -1,6 +1,7 @@
 package config
 
 import (
+	_ "embed"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,6 +9,9 @@ import (
 
 	"gopkg.in/yaml.v3"
 )
+
+//go:embed default_config.yaml
+var defaultConfigYAML []byte
 
 var Version = "dev"
 
@@ -117,23 +121,44 @@ func ConfigPath() (string, error) {
 	return primary, nil
 }
 
-func Load() (Config, error) {
+// writeDefaultConfig writes the embedded default config template to the
+// primary config path. Returns the path written, or empty string on failure.
+func writeDefaultConfig() string {
+	dir, err := ConfigDir()
+	if err != nil {
+		return ""
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return ""
+	}
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, defaultConfigYAML, 0o644); err != nil {
+		return ""
+	}
+	return path
+}
+
+// Load reads the config file, or returns defaults if none exists.
+// The second return value is the path of a newly created default config file
+// (empty string if no file was created).
+func Load() (Config, string, error) {
 	cfg := DefaultConfig()
 	path, err := ConfigPath()
 	if err != nil {
-		return cfg, nil
+		return cfg, "", nil
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return cfg, nil
+			created := writeDefaultConfig()
+			return cfg, created, nil
 		}
-		return cfg, fmt.Errorf("reading config: %w", err)
+		return cfg, "", fmt.Errorf("reading config: %w", err)
 	}
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return cfg, fmt.Errorf("parsing config: %w", err)
+		return cfg, "", fmt.Errorf("parsing config: %w", err)
 	}
-	return cfg, nil
+	return cfg, "", nil
 }
 
 func Save(cfg Config) error {

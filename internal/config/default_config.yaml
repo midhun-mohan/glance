@@ -1,0 +1,48 @@
+# Glance configuration
+# Documentation: https://github.com/midhun-mohan/glance
+
+# Organization settings
+orgs:
+  # Automatically detect orgs from your GitHub account
+  auto_detect: true
+  # Explicitly include specific orgs (overrides auto_detect if non-empty)
+  include: []
+  # Exclude specific orgs from results
+  exclude: []
+
+# Auto-refresh settings
+refresh:
+  # How often to refresh PR data (e.g., "5m", "30s", "1h")
+  interval: "5m"
+  # Refresh when the terminal window regains focus
+  on_focus: true
+
+# Desktop notification settings
+notifications:
+  enabled: true
+  events:
+    # Notify when you are assigned to a PR
+    new_assignment: true
+    # Notify when your review is requested
+    review_requested: true
+    # Notify when a PR's status changes (merged, closed, etc.)
+    status_change: true
+    # Notify when you are @mentioned
+    mentions: true
+    # Also notify for team-based assignments and review requests
+    include_team: false
+
+# Saved filter presets (use with --preset flag or 'p' key in the TUI)
+# Example:
+#   urgent: "status:open label:urgent"
+#   my-team: "org:my-org team:my-team"
+presets: {}
+
+# UI settings
+ui:
+  # Color theme: "auto", "dark", or "light"
+  theme: "auto"
+  # Use compact layout (less whitespace)
+  compact: false
+  # Show user avatars (requires terminal image support)
+  show_avatars: false

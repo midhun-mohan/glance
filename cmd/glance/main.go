@@ -70,10 +70,13 @@ func run(cmd *cobra.Command, args []string) error {
 	}
 
 	// Load config
-	cfg, err := config.Load()
+	cfg, created, err := config.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: %v, using defaults\n", err)
 		cfg = config.DefaultConfig()
+	}
+	if created != "" {
+		fmt.Fprintf(os.Stderr, "Config created: %s\n", created)
 	}
 
 	// Apply CLI overrides
@@ -145,17 +148,12 @@ func run(cmd *cobra.Command, args []string) error {
 }
 
 func openConfigInEditor() error {
+	// Ensure config file exists (Load creates it with comments if missing)
+	config.Load()
+
 	path, err := config.ConfigPath()
 	if err != nil {
 		return err
-	}
-
-	// Ensure config exists
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		cfg := config.DefaultConfig()
-		if err := config.Save(cfg); err != nil {
-			return fmt.Errorf("creating default config: %w", err)
-		}
 	}
 
 	editor := os.Getenv("EDITOR")
