@@ -1420,6 +1420,13 @@ func (m Model) View() string {
 		return "Loading..."
 	}
 
+	// Full-screen centered loading on first fetch
+	if m.loading && m.firstLoad {
+		hourglass := hourglassFrames[m.hourglassFrame%len(hourglassFrames)]
+		loading := spinnerStyle.Render(hourglass + " Fetching pull requests...")
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, loading)
+	}
+
 	// Help overlay (full screen, no box)
 	if m.showHelp {
 		return renderHelp(m.width, m.height)
