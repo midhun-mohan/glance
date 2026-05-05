@@ -1,12 +1,16 @@
-# glance
+# Glance
 
-Your GitHub pull requests, at a glance.
+Your GitHub pull requests, at a Glance.
+
+![alt text](home.png)
 
 **glance** is a terminal dashboard that gives you a unified view of your GitHub pull requests across all your organizations. No more juggling browser tabs — review, comment, approve, and merge without leaving the terminal.
 
 ## What it solves
 
-If you work across multiple GitHub organizations and repositories, keeping track of PRs is painful. glance puts everything in one place:
+In the agentic era, your terminal is the cockpit. Agents are spinning up branches, opening PRs, and asking for reviews faster than ever — and the last thing you want is to break flow, leave the terminal, and lose yourself in a maze of browser tabs just to keep up.
+
+glance keeps the review loop where the work already lives. If you work across multiple GitHub organizations and repositories, keeping track of PRs is painful. glance puts everything in one place:
 
 - **Created by me** — your open PRs and their CI/review status
 - **Review requested** — PRs waiting for your review
