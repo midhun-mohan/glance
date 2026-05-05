@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -310,24 +311,58 @@ func (m Model) renderFileListPanel(width, height int, d *github.PRDetail) string
 
 	contentW := width - 4 // border + padding
 
-	var lines []string
-	for i, f := range d.Files {
-		icon := fileStatusIcon(f.Status)
-		stats := helpDescStyle.Render(fmt.Sprintf("+%d -%d", f.Additions, f.Deletions))
+	// Build ordered list of directories preserving first-seen order.
+	var dirOrder []string
+	dirSeen := map[string]bool{}
+	for _, f := range d.Files {
+		dir := filepath.Dir(f.Filename)
+		if dir == "." {
+			dir = "/"
+		}
+		if !dirSeen[dir] {
+			dirSeen[dir] = true
+			dirOrder = append(dirOrder, dir)
+		}
+	}
 
-		name := f.Filename
-		nameW := contentW - 12
+	// Render lines grouped by directory.
+	var lines []string
+	cursorLine := -1 // rendered line index of selected file
+	lastDir := ""
+	for i, f := range d.Files {
+		dir := filepath.Dir(f.Filename)
+		if dir == "." {
+			dir = "/"
+		}
+
+		// Emit folder header when directory changes.
+		if dir != lastDir {
+			if lastDir != "" {
+				lines = append(lines, "") // blank separator between groups
+			}
+			folderHeader := helpDescStyle.Render("📁 " + dir)
+			lines = append(lines, folderHeader)
+			lastDir = dir
+		}
+
+		icon := fileStatusIcon(f.Status)
+		addStat := lipgloss.NewStyle().Foreground(successColor).Render(fmt.Sprintf("+%d", f.Additions))
+		delStat := lipgloss.NewStyle().Foreground(dangerColor).Render(fmt.Sprintf("-%d", f.Deletions))
+		stats := addStat + " " + delStat
+
+		name := filepath.Base(f.Filename)
+		nameW := contentW - 14 // icon + indent + stats
 		if nameW < 10 {
 			nameW = 10
 		}
-		// Show just the filename, truncate path from left if needed
 		if len(name) > nameW {
 			name = "…" + name[len(name)-nameW+1:]
 		}
 
-		row := fmt.Sprintf("%s %-*s %s", icon, nameW, name, stats)
+		row := fmt.Sprintf("  %s %-*s %s", icon, nameW, name, stats)
 
 		if i == m.fileCursor {
+			cursorLine = len(lines)
 			row = padAndHighlight(row, contentW, selectedPRStyle)
 		}
 		lines = append(lines, row)
@@ -339,11 +374,13 @@ func (m Model) renderFileListPanel(width, height int, d *github.PRDetail) string
 		visH = 3
 	}
 	scroll := m.fileListScroll
-	if m.fileCursor < scroll {
-		scroll = m.fileCursor
-	}
-	if m.fileCursor >= scroll+visH {
-		scroll = m.fileCursor - visH + 1
+	if cursorLine >= 0 {
+		if cursorLine < scroll {
+			scroll = cursorLine
+		}
+		if cursorLine >= scroll+visH {
+			scroll = cursorLine - visH + 1
+		}
 	}
 	if scroll < 0 {
 		scroll = 0
