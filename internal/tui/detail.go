@@ -297,7 +297,7 @@ func (m Model) renderDetailFooter(width int) string {
 		actions += "  M merge"
 	}
 
-	hints := helpDescStyle.Render(nav + "  " + actions + "  o open  y copy  r refresh  Esc close")
+	hints := helpDescStyle.Render(nav + "  " + actions + "  i diff/info  o open  y copy  r refresh  Esc close")
 
 	return sep + "\n" + hints
 }

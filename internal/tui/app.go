@@ -55,6 +55,7 @@ type Model struct {
 
 	// Help
 	showHelp      bool
+	pendingKey    string // for multi-key sequences like gg
 
 	// Preset picker
 	showPresets   bool
@@ -365,9 +366,59 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleSearchKey(msg)
 	}
 
+	// Handle pending key sequences (gg)
+	if m.pendingKey == "g" {
+		m.pendingKey = ""
+		if msg.String() == "g" {
+			// gg — jump to top
+			m.page = 0
+			m.cursor = 0
+			return m, nil
+		}
+		// Not a recognized sequence, fall through to normal handling
+	}
+
 	switch msg.String() {
 	case "q":
 		return m, tea.Quit
+	case "g":
+		m.pendingKey = "g"
+		return m, nil
+	case "G":
+		// Jump to bottom
+		all := m.allDisplayItems()
+		if len(all) > 0 {
+			ps := m.currentPageSize()
+			lastIdx := len(all) - 1
+			m.page = lastIdx / ps
+			m.cursor = lastIdx % ps
+		}
+		return m, nil
+	case "ctrl+d":
+		// Half-page down
+		ps := m.currentPageSize()
+		half := ps / 2
+		_, total := m.pagedDisplayItems(ps)
+		globalIdx := m.page*ps + m.cursor + half
+		if globalIdx >= total {
+			globalIdx = total - 1
+		}
+		if globalIdx >= 0 {
+			m.page = globalIdx / ps
+			m.cursor = globalIdx % ps
+		}
+		return m, nil
+	case "ctrl+u":
+		// Half-page up
+		ps := m.currentPageSize()
+		half := ps / 2
+		globalIdx := m.page*ps + m.cursor - half
+		if globalIdx < 0 {
+			globalIdx = 0
+		}
+		m.page = globalIdx / ps
+		m.cursor = globalIdx % ps
+		return m, nil
 	case "up", "k":
 		if m.cursor > 0 {
 			m.cursor--
@@ -386,6 +437,14 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.page++
 			m.cursor = 0
 		}
+		return m, nil
+	case "J", "shift+down":
+		// Jump to next repo group
+		m.jumpToNextRepoGroup()
+		return m, nil
+	case "K", "shift+up":
+		// Jump to previous repo group
+		m.jumpToPrevRepoGroup()
 		return m, nil
 	case "left", "h":
 		ps := m.currentPageSize()
@@ -522,11 +581,27 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.collapsedRepos[repo] = true
 			}
 			delete(m.expandedRepoLimit, repo) // reset to default limit
+			// Move cursor to the repo's header/first item in the new layout
+			m.moveCursorToRepo(repo)
 		}
 		return m, nil
-	case "E":
-		// Expand all collapsed groups
-		m.collapsedRepos = make(map[string]bool)
+	case "C":
+		// Toggle all groups: collapse all if any expanded, expand all if all collapsed
+		repos := m.currentRepoNames()
+		allCollapsed := true
+		for _, name := range repos {
+			if !m.collapsedRepos[name] {
+				allCollapsed = false
+				break
+			}
+		}
+		if allCollapsed {
+			m.collapsedRepos = make(map[string]bool)
+		} else {
+			for _, name := range repos {
+				m.collapsedRepos[name] = true
+			}
+		}
 		m.cursor = 0
 		m.page = 0
 		return m, nil
@@ -1119,6 +1194,81 @@ func (m *Model) setCursorToRepoTail(repo string) {
 	m.cursor = targetIdx % ps
 }
 
+// moveCursorToRepo positions the cursor on the first display item for the given
+// repo (collapsed header or first PR), adjusting m.page accordingly.
+func (m *Model) moveCursorToRepo(repo string) {
+	all := m.allDisplayItems()
+	for i, item := range all {
+		if (item.isPR && item.pr.Repository == repo) || (!item.isPR && item.repoName == repo) {
+			ps := m.currentPageSize()
+			m.page = i / ps
+			m.cursor = i % ps
+			return
+		}
+	}
+}
+
+// jumpToNextRepoGroup moves the cursor to the first item of the next repo group.
+func (m *Model) jumpToNextRepoGroup() {
+	all := m.allDisplayItems()
+	ps := m.currentPageSize()
+	globalIdx := m.page*ps + m.cursor
+
+	// Find current repo
+	if globalIdx < 0 || globalIdx >= len(all) {
+		return
+	}
+	currentRepo := itemRepo(all[globalIdx])
+
+	// Scan forward past current repo, then land on the first item of the next
+	for i := globalIdx + 1; i < len(all); i++ {
+		if itemRepo(all[i]) != currentRepo {
+			m.page = i / ps
+			m.cursor = i % ps
+			return
+		}
+	}
+}
+
+// jumpToPrevRepoGroup moves the cursor to the first item of the previous repo group.
+func (m *Model) jumpToPrevRepoGroup() {
+	all := m.allDisplayItems()
+	ps := m.currentPageSize()
+	globalIdx := m.page*ps + m.cursor
+
+	if globalIdx <= 0 || globalIdx >= len(all) {
+		return
+	}
+	currentRepo := itemRepo(all[globalIdx])
+
+	// If already on the first item of current group, jump to the previous group
+	// Otherwise, jump to the first item of the current group
+	firstOfCurrent := globalIdx
+	for firstOfCurrent > 0 && itemRepo(all[firstOfCurrent-1]) == currentRepo {
+		firstOfCurrent--
+	}
+
+	target := firstOfCurrent
+	if globalIdx == firstOfCurrent && firstOfCurrent > 0 {
+		// Already at group start — find start of previous group
+		prevRepo := itemRepo(all[firstOfCurrent-1])
+		target = firstOfCurrent - 1
+		for target > 0 && itemRepo(all[target-1]) == prevRepo {
+			target--
+		}
+	}
+
+	m.page = target / ps
+	m.cursor = target % ps
+}
+
+func itemRepo(item displayItem) string {
+	if item.isPR {
+		return item.pr.Repository
+	}
+	return item.repoName
+}
+
 // allDisplayItems returns a flat list of navigable items: PR rows for expanded
 // groups and collapsed-header items for collapsed groups, in sorted repo order.
 func (m Model) allDisplayItems() []displayItem {
@@ -1165,6 +1315,19 @@ func (m Model) allDisplayItems() []displayItem {
 		}
 	}
 	return items
+}
+
+// currentRepoNames returns the unique repo names from the current section's filtered PRs.
+func (m Model) currentRepoNames() []string {
+	var names []string
+	seen := map[string]bool{}
+	for _, pr := range m.filteredPRs() {
+		if !seen[pr.Repository] {
+			seen[pr.Repository] = true
+			names = append(names, pr.Repository)
+		}
+	}
+	return names
 }
 
 func (m Model) pagedDisplayItems(ps int) (page []displayItem, total int) {
