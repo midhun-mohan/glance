@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	_ "embed"
 	"fmt"
 	"os"
@@ -155,6 +156,7 @@ func Load() (Config, string, error) {
 		}
 		return cfg, "", fmt.Errorf("reading config: %w", err)
 	}
+	data = bytes.ReplaceAll(data, []byte("\t"), []byte("  "))
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return cfg, "", fmt.Errorf("parsing config: %w", err)
 	}
