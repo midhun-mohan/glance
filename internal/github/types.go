@@ -212,6 +212,7 @@ type PRDetail struct {
 	URL            string
 	Repository     string
 	Author         string
+	NodeID         string
 	Number         int
 	Additions      int
 	Deletions      int

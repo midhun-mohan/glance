@@ -345,6 +345,7 @@ func (c *Client) FetchPRDetail(owner, repo string, number int) (*PRDetail, error
 	query := `query($owner: String!, $repo: String!, $number: Int!) {
 		repository(owner: $owner, name: $repo) {
 			pullRequest(number: $number) {
+				id
 				title
 				body
 				number
@@ -404,6 +405,7 @@ func (c *Client) FetchPRDetail(owner, repo string, number int) (*PRDetail, error
 	var result struct {
 		Repository struct {
 			PullRequest struct {
+				ID           string    `json:"id"`
 				Title        string    `json:"title"`
 				Body         string    `json:"body"`
 				Number       int       `json:"number"`
@@ -488,6 +490,7 @@ func (c *Client) FetchPRDetail(owner, repo string, number int) (*PRDetail, error
 		Body:           pr.Body,
 		Number:         pr.Number,
 		URL:            pr.URL,
+		NodeID:         pr.ID,
 		State:          pr.State,
 		IsDraft:        pr.IsDraft,
 		Mergeable:      pr.Mergeable,
@@ -939,4 +942,68 @@ func (c *Client) MergePR(owner, repo string, number int, commitTitle string) err
 		return fmt.Errorf("GitHub API error %d: %s", resp.StatusCode, string(respBody))
 	}
 	return nil
+}
+
+// ClosePR closes an open pull request.
+func (c *Client) ClosePR(owner, repo string, number int) error {
+	return c.updatePRState(owner, repo, number, "closed")
+}
+
+// ReopenPR reopens a closed pull request.
+func (c *Client) ReopenPR(owner, repo string, number int) error {
+	return c.updatePRState(owner, repo, number, "open")
+}
+
+func (c *Client) updatePRState(owner, repo string, number int, state string) error {
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%d", owner, repo, number)
+
+	payload := map[string]string{"state": state}
+	jsonBody, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshaling state update: %w", err)
+	}
+
+	req, err := http.NewRequest("PATCH", url, bytes.NewReader(jsonBody))
+	if err != nil {
+		return fmt.Errorf("creating request: %w", err)
+	}
+	req.Header.Set("Authorization", "bearer "+c.token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("executing request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("GitHub API error %d: %s", resp.StatusCode, string(respBody))
+	}
+	return nil
+}
+
+// ConvertToDraft converts a pull request to draft using the GraphQL API.
+func (c *Client) ConvertToDraft(nodeID string) error {
+	query := `mutation($id: ID!) {
+		convertPullRequestToDraft(input: {pullRequestId: $id}) {
+			pullRequest { id }
+		}
+	}`
+	vars := map[string]interface{}{"id": nodeID}
+	var result interface{}
+	return c.graphQL(query, vars, &result)
+}
+
+// MarkReadyForReview marks a draft pull request as ready for review using the GraphQL API.
+func (c *Client) MarkReadyForReview(nodeID string) error {
+	query := `mutation($id: ID!) {
+		markPullRequestReadyForReview(input: {pullRequestId: $id}) {
+			pullRequest { id }
+		}
+	}`
+	vars := map[string]interface{}{"id": nodeID}
+	var result interface{}
+	return c.graphQL(query, vars, &result)
 }

@@ -287,12 +287,12 @@ func (m Model) renderDetailFooter(width int) string {
 	} else if m.detailRightTab == 0 {
 		nav = "↑↓ navigate  c comment  Tab switch"
 	} else if m.detailRightTab == 1 && m.detailData != nil && len(m.detailData.Checks) > 0 {
-		nav = "↑↓ checks  o open check  Tab switch"
+		nav = "↑↓ scroll  J/K checks  o open check  Tab switch"
 	} else {
 		nav = "↑↓ scroll  Tab switch"
 	}
 
-	actions := "c comment  A approve  X reject"
+	actions := "c comment  A approve  X reject  W close/reopen  D draft"
 	if m.activeSection == github.SectionCreated {
 		actions += "  M merge"
 	}

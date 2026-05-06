@@ -136,6 +136,7 @@ type confirmContext struct {
 	repo   string
 	number int
 	title  string
+	nodeID string
 }
 
 type clearCheckNoURLMsg struct{}
@@ -870,6 +871,7 @@ func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				repo:   repo,
 				number: m.detailData.Number,
 				title:  m.detailData.Title,
+				nodeID: m.detailData.NodeID,
 			}
 		}
 		return m, nil
@@ -883,6 +885,7 @@ func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				repo:   repo,
 				number: m.detailData.Number,
 				title:  m.detailData.Title,
+				nodeID: m.detailData.NodeID,
 			}
 		}
 		return m, nil
@@ -896,6 +899,45 @@ func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				repo:   repo,
 				number: m.detailData.Number,
 				title:  m.detailData.Title,
+				nodeID: m.detailData.NodeID,
+			}
+		}
+		return m, nil
+	case "W":
+		// Close or reopen PR
+		if m.detailData != nil && m.detailData.State != "MERGED" {
+			owner, repo := github.SplitOwnerRepo(m.detailData.Repository)
+			if m.detailData.State == "CLOSED" {
+				m.confirmMode = "reopen"
+			} else {
+				m.confirmMode = "close"
+			}
+			m.confirmInput = ""
+			m.confirmPR = &confirmContext{
+				owner:  owner,
+				repo:   repo,
+				number: m.detailData.Number,
+				title:  m.detailData.Title,
+				nodeID: m.detailData.NodeID,
+			}
+		}
+		return m, nil
+	case "D":
+		// Toggle draft status
+		if m.detailData != nil && m.detailData.State == "OPEN" {
+			owner, repo := github.SplitOwnerRepo(m.detailData.Repository)
+			if m.detailData.IsDraft {
+				m.confirmMode = "ready"
+			} else {
+				m.confirmMode = "draft"
+			}
+			m.confirmInput = ""
+			m.confirmPR = &confirmContext{
+				owner:  owner,
+				repo:   repo,
+				number: m.detailData.Number,
+				title:  m.detailData.Title,
+				nodeID: m.detailData.NodeID,
 			}
 		}
 		return m, nil
@@ -922,6 +964,7 @@ func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				repo:   repo,
 				number: m.detailData.Number,
 				title:  m.detailData.Title,
+				nodeID: m.detailData.NodeID,
 			}
 		}
 		return m, nil
@@ -959,10 +1002,6 @@ func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				if m.diffCursor > 0 {
 					m.diffCursor--
 				}
-			} else if m.detailData != nil && len(m.detailData.Checks) > 0 {
-				if m.checkCursor > 0 {
-					m.checkCursor--
-				}
 			} else {
 				if m.infoScroll > 0 {
 					m.infoScroll--
@@ -978,12 +1017,22 @@ func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				if m.diffCursor < maxLine {
 					m.diffCursor++
 				}
-			} else if m.detailData != nil && len(m.detailData.Checks) > 0 {
+			} else {
+				m.infoScroll++
+			}
+			return m, nil
+		case "J", "shift+down":
+			if m.detailRightTab == 1 && m.detailData != nil && len(m.detailData.Checks) > 0 {
 				if m.checkCursor < len(m.detailData.Checks)-1 {
 					m.checkCursor++
 				}
-			} else {
-				m.infoScroll++
+			}
+			return m, nil
+		case "K", "shift+up":
+			if m.detailRightTab == 1 && m.detailData != nil && len(m.detailData.Checks) > 0 {
+				if m.checkCursor > 0 {
+					m.checkCursor--
+				}
 			}
 			return m, nil
 		case "enter":
@@ -1079,12 +1128,14 @@ func (m Model) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.confirmLoading = true
 		return m, m.submitPRAction()
 	case "backspace":
-		if m.confirmMode != "merge" && len(m.confirmInput) > 0 {
+		noInput := m.confirmMode == "merge" || m.confirmMode == "close" || m.confirmMode == "reopen" || m.confirmMode == "draft" || m.confirmMode == "ready"
+		if !noInput && len(m.confirmInput) > 0 {
 			m.confirmInput = m.confirmInput[:len(m.confirmInput)-1]
 		}
 		return m, nil
 	default:
-		if m.confirmMode != "merge" && len(msg.String()) == 1 {
+		noInput := m.confirmMode == "merge" || m.confirmMode == "close" || m.confirmMode == "reopen" || m.confirmMode == "draft" || m.confirmMode == "ready"
+		if !noInput && len(msg.String()) == 1 {
 			m.confirmInput += msg.String()
 		}
 		return m, nil
@@ -1124,6 +1175,30 @@ func (m Model) submitPRAction() tea.Cmd {
 				return prActionResultMsg{success: false, message: fmt.Sprintf("✗ Failed: %v", err)}
 			}
 			return prActionResultMsg{success: true, message: "✓ Comment added"}
+		case "close":
+			err := client.ClosePR(pr.owner, pr.repo, pr.number)
+			if err != nil {
+				return prActionResultMsg{success: false, message: fmt.Sprintf("✗ Failed: %v", err)}
+			}
+			return prActionResultMsg{success: true, message: "✓ PR closed"}
+		case "reopen":
+			err := client.ReopenPR(pr.owner, pr.repo, pr.number)
+			if err != nil {
+				return prActionResultMsg{success: false, message: fmt.Sprintf("✗ Failed: %v", err)}
+			}
+			return prActionResultMsg{success: true, message: "✓ PR reopened"}
+		case "draft":
+			err := client.ConvertToDraft(pr.nodeID)
+			if err != nil {
+				return prActionResultMsg{success: false, message: fmt.Sprintf("✗ Failed: %v", err)}
+			}
+			return prActionResultMsg{success: true, message: "✓ PR converted to draft"}
+		case "ready":
+			err := client.MarkReadyForReview(pr.nodeID)
+			if err != nil {
+				return prActionResultMsg{success: false, message: fmt.Sprintf("✗ Failed: %v", err)}
+			}
+			return prActionResultMsg{success: true, message: "✓ PR marked ready for review"}
 		}
 		return prActionResultMsg{success: false, message: "✗ Unknown action"}
 	}
@@ -1677,6 +1752,34 @@ func (m Model) renderConfirmDialog() string {
 		lines = append(lines, helpDescStyle.Render("Comment (required):"))
 		inputBox := confirmInputStyle.Width(35).Render(m.confirmInput + "█")
 		lines = append(lines, inputBox)
+
+	case "close":
+		title := lipgloss.NewStyle().Bold(true).Foreground(dangerColor).Render(
+			fmt.Sprintf("Close PR #%d?", pr.number))
+		lines = append(lines, title)
+		lines = append(lines, "")
+		lines = append(lines, detailBodyStyle.Render(pr.title))
+
+	case "reopen":
+		title := lipgloss.NewStyle().Bold(true).Foreground(successColor).Render(
+			fmt.Sprintf("Reopen PR #%d?", pr.number))
+		lines = append(lines, title)
+		lines = append(lines, "")
+		lines = append(lines, detailBodyStyle.Render(pr.title))
+
+	case "draft":
+		title := lipgloss.NewStyle().Bold(true).Foreground(warningColor).Render(
+			fmt.Sprintf("Convert PR #%d to draft?", pr.number))
+		lines = append(lines, title)
+		lines = append(lines, "")
+		lines = append(lines, detailBodyStyle.Render(pr.title))
+
+	case "ready":
+		title := lipgloss.NewStyle().Bold(true).Foreground(successColor).Render(
+			fmt.Sprintf("Mark PR #%d ready for review?", pr.number))
+		lines = append(lines, title)
+		lines = append(lines, "")
+		lines = append(lines, detailBodyStyle.Render(pr.title))
 	}
 
 	if m.confirmLoading {

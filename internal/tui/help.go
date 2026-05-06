@@ -33,6 +33,8 @@ var helpEntries = []helpEntry{
 	{"A", "Approve PR"},
 	{"X", "Request changes"},
 	{"M", "Merge PR (squash)"},
+	{"W", "Close/reopen PR"},
+	{"D", "Toggle draft status"},
 	{"c", "Collapse/expand group"},
 	{"C", "Collapse/expand all groups"},
 	{"B", "Browse any PR"},
