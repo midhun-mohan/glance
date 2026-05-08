@@ -277,6 +277,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case errMsg:
+		// On background refresh, suppress transient errors if we already have data.
+		if !m.firstLoad && m.hasPRData() {
+			m.loading = false
+			return m, nil
+		}
 		m.err = msg.err
 		m.loading = false
 		return m, nil
@@ -1219,6 +1224,16 @@ func (m Model) presetNames() []string {
 		names = append(names, name)
 	}
 	return names
+}
+
+// hasPRData returns true if any section has PR data from a previous fetch.
+func (m Model) hasPRData() bool {
+	for _, prs := range m.prs {
+		if len(prs) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func (m Model) filteredPRs() []github.PullRequest {
