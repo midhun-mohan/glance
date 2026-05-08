@@ -3,8 +3,10 @@ package tui
 import (
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -246,6 +248,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case prDetailLoadedMsg:
 		m.detailLoading = false
 		m.detailData = &msg.detail
+		// Sort files by directory path so the grouped view has no duplicates.
+		sort.SliceStable(m.detailData.Files, func(i, j int) bool {
+			di := filepath.Dir(m.detailData.Files[i].Filename)
+			dj := filepath.Dir(m.detailData.Files[j].Filename)
+			return di < dj
+		})
 		if m.browsePending {
 			m.browsePending = false
 			pr := github.PRFromDetail(&msg.detail)

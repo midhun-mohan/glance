@@ -311,20 +311,6 @@ func (m Model) renderFileListPanel(width, height int, d *github.PRDetail) string
 
 	contentW := width - 4 // border + padding
 
-	// Build ordered list of directories preserving first-seen order.
-	var dirOrder []string
-	dirSeen := map[string]bool{}
-	for _, f := range d.Files {
-		dir := filepath.Dir(f.Filename)
-		if dir == "." {
-			dir = "/"
-		}
-		if !dirSeen[dir] {
-			dirSeen[dir] = true
-			dirOrder = append(dirOrder, dir)
-		}
-	}
-
 	// Render lines grouped by directory.
 	var lines []string
 	cursorLine := -1 // rendered line index of selected file
