@@ -31,7 +31,22 @@ if [ -z "$VERSION" ]; then
   exit 1
 fi
 
-echo "Installing ${BINARY} v${VERSION} (${OS}/${ARCH})"
+# Check for existing installation
+CURRENT_VERSION=""
+if command -v "$BINARY" >/dev/null 2>&1; then
+  CURRENT_VERSION="$("$BINARY" --version 2>/dev/null | sed -E 's/.*v([0-9][^ ]*).*/\1/' || true)"
+  if [ "$CURRENT_VERSION" = "$VERSION" ]; then
+    echo "glance v${VERSION} is already installed and up-to-date."
+    exit 0
+  fi
+  if [ -n "$CURRENT_VERSION" ]; then
+    echo "Upgrading glance v${CURRENT_VERSION} → v${VERSION} (${OS}/${ARCH})"
+  else
+    echo "Upgrading glance to v${VERSION} (${OS}/${ARCH})"
+  fi
+else
+  echo "Installing glance v${VERSION} (${OS}/${ARCH})"
+fi
 
 # Build download URL
 ARCHIVE="${BINARY}_${OS}_${ARCH}"
@@ -68,9 +83,13 @@ fi
 chmod +x "${INSTALL_DIR}/${BINARY}"
 
 echo ""
-echo "glance v${VERSION} installed to ${INSTALL_DIR}/${BINARY}"
-echo ""
-echo "Prerequisites: gh CLI (https://cli.github.com)"
-echo "  Run 'gh auth login' if you haven't already."
+if [ -n "$CURRENT_VERSION" ]; then
+  echo "glance upgraded from v${CURRENT_VERSION} → v${VERSION}"
+else
+  echo "glance v${VERSION} installed successfully"
+  echo ""
+  echo "Prerequisites: gh CLI (https://cli.github.com)"
+  echo "  Run 'gh auth login' if you haven't already."
+fi
 echo ""
 echo "Usage: glance"
