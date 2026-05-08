@@ -1627,14 +1627,21 @@ func (m Model) View() string {
 	var sections []string
 	sections = append(sections, chrome...)
 
+	// Compute per-repo PR counts from filtered PRs.
+	repoCounts := map[string]int{}
+	for _, pr := range m.filteredPRs() {
+		repoCounts[pr.Repository]++
+	}
+
+	prList := renderPRList(items, m.cursor, innerWidth, m.activeSection, m.unseenPRs, repoCounts)
+	prListView := lipgloss.NewStyle().Height(availableListHeight).MaxHeight(availableListHeight).Render(prList)
+	sections = append(sections, prListView)
+
+	// Page info at the bottom
 	if pages > 1 {
 		pageInfo := ageStyle.Render(fmt.Sprintf("  Page %d/%d (%d items)", m.page+1, pages, total))
 		sections = append(sections, pageInfo)
 	}
-
-	prList := renderPRList(items, m.cursor, innerWidth, m.activeSection, m.unseenPRs)
-	prListView := lipgloss.NewStyle().Height(availableListHeight).MaxHeight(availableListHeight).Render(prList)
-	sections = append(sections, prListView)
 
 	// Status bar
 	statusBar := renderStatusBar(m.lastRefresh, m.loading, m.firstLoad, m.refreshInterval, m.hourglassFrame, innerWidth)

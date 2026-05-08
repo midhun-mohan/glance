@@ -57,7 +57,7 @@ func titleColWidth(totalWidth int) int {
 	return w
 }
 
-func renderPRList(items []displayItem, cursor int, width int, section github.Section, unseenPRs map[string]bool) string {
+func renderPRList(items []displayItem, cursor int, width int, section github.Section, unseenPRs map[string]bool, repoCounts map[string]int) string {
 	if len(items) == 0 {
 		return emptyStyle.Render("No pull requests in this section")
 	}
@@ -78,7 +78,8 @@ func renderPRList(items []displayItem, cursor int, width int, section github.Sec
 				if groupIndex > 0 {
 					rows = append(rows, "")
 				}
-				rows = append(rows, repoHeaderStyle.Render(" ▾ "+item.pr.Repository))
+				header := fmt.Sprintf(" ▾ %s (%d)", item.pr.Repository, repoCounts[item.pr.Repository])
+				rows = append(rows, repoHeaderStyle.Render(header))
 				lastRepo = item.pr.Repository
 				groupIndex++
 			}
