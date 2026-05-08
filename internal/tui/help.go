@@ -79,7 +79,6 @@ func renderHelp(width, height int) string {
 func renderHelpBar(width int) string {
 	hints := []helpEntry{
 		{"↑↓", "navigate"},
-		{"←→", "page"},
 		{"Tab", "section"},
 		{"Enter", "details"},
 		{"o", "open"},
