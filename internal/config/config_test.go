@@ -116,3 +116,54 @@ func TestLoadCreatesDefaultConfig(t *testing.T) {
 		t.Errorf("second Load() created = %q, want empty string", created2)
 	}
 }
+
+func TestCheckConfigSymlink(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	regular := filepath.Join(tmpHome, "regular.yaml")
+	if err := os.WriteFile(regular, []byte("a: 1\n"), 0o600); err != nil {
+		t.Fatalf("writing regular file: %v", err)
+	}
+
+	insideTarget := filepath.Join(tmpHome, "dotfiles", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(insideTarget), 0o700); err != nil {
+		t.Fatalf("mkdir inside: %v", err)
+	}
+	if err := os.WriteFile(insideTarget, []byte("a: 1\n"), 0o600); err != nil {
+		t.Fatalf("writing inside target: %v", err)
+	}
+	insideLink := filepath.Join(tmpHome, "inside.yaml")
+	if err := os.Symlink(insideTarget, insideLink); err != nil {
+		t.Fatalf("symlink inside: %v", err)
+	}
+
+	outsideDir := t.TempDir()
+	outsideTarget := filepath.Join(outsideDir, "config.yaml")
+	if err := os.WriteFile(outsideTarget, []byte("a: 1\n"), 0o600); err != nil {
+		t.Fatalf("writing outside target: %v", err)
+	}
+	outsideLink := filepath.Join(tmpHome, "outside.yaml")
+	if err := os.Symlink(outsideTarget, outsideLink); err != nil {
+		t.Fatalf("symlink outside: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		path    string
+		wantErr bool
+	}{
+		{"regular file", regular, false},
+		{"missing file", filepath.Join(tmpHome, "nope.yaml"), false},
+		{"symlink inside $HOME", insideLink, false},
+		{"symlink escaping $HOME", outsideLink, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := checkConfigSymlink(tt.path)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("checkConfigSymlink(%q) err = %v, wantErr = %v", tt.path, err, tt.wantErr)
+			}
+		})
+	}
+}

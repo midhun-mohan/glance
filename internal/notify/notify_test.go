@@ -33,9 +33,9 @@ func TestEscapePowerShell(t *testing.T) {
 	}{
 		{"plain", "hello world", "hello world"},
 		{"single quotes", "it's done", "it''s done"},
-		{"backtick", "use `this`", "use ``this``"},
-		{"dollar", "$var", "`$var"},
-		{"combined", "it's $100 `ok`", "it''s `$100 ``ok``"},
+		{"backtick literal", "use `this`", "use `this`"},
+		{"dollar literal", "$var", "$var"},
+		{"combined", "it's $100 `ok`", "it''s $100 `ok`"},
 		{"empty", "", ""},
 	}
 

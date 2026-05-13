@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/midhun-mohan/glance/internal/github"
@@ -15,8 +16,8 @@ const (
 	colNumber = 7  // #12345
 	colAuthor = 16
 	colAge    = 9  // "3mo ago"
-	colReview = 3  // ✓ ✗ ⏳
-	colChecks = 3  // CI: ✓ ✗ ●
+	colReview = 6  // "Review" header; data is a single icon (✓ ✗ ⏳)
+	colChecks = 6  // "Checks" header; data is a single icon (✓ ✗ ●)
 	colGap    = 3  // gaps between columns
 )
 
@@ -57,7 +58,7 @@ func titleColWidth(totalWidth int) int {
 	return w
 }
 
-func renderPRList(items []displayItem, cursor int, width int, section github.Section, unseenPRs map[string]bool, repoCounts map[string]int) string {
+func renderPRList(items []displayItem, cursor int, width int, unseenPRs map[string]bool, repoCounts map[string]int) string {
 	if len(items) == 0 {
 		return emptyStyle.Render("No pull requests in this section")
 	}
@@ -66,7 +67,7 @@ func renderPRList(items []displayItem, cursor int, width int, section github.Sec
 
 	// Column header shown once at top
 	var rows []string
-	rows = append(rows, renderColumnHeader(tw, section))
+	rows = append(rows, renderColumnHeader(tw))
 
 	lastRepo := ""
 	groupIndex := 0
@@ -84,7 +85,7 @@ func renderPRList(items []displayItem, cursor int, width int, section github.Sec
 				groupIndex++
 			}
 			isUnseen := unseenPRs[item.pr.URL]
-			row := renderPRRow(item.pr, tw, section, isUnseen)
+			row := renderPRRow(item.pr, tw, isUnseen)
 			if i == cursor {
 				rows = append(rows, padAndHighlight(row, width, selectedPRStyle))
 			} else {
@@ -181,18 +182,14 @@ func countDisplayItemOverhead(items []displayItem) int {
 	return overhead
 }
 
-func renderColumnHeader(tw int, section github.Section) string {
+func renderColumnHeader(tw int) string {
 	st := colHeaderStyle.Width(colStatus).Render("")
 	num := colHeaderStyle.Width(colNumber).Render("#")
 	title := colHeaderStyle.Width(tw).Render("Title")
 	author := colHeaderStyle.Width(colAuthor).Render("Author")
 	age := colHeaderStyle.Width(colAge).Render("Age")
-	review := colHeaderStyle.Width(colReview).Render("R")
-	checksLabel := "CI"
-	if section == github.SectionCreated {
-		checksLabel = "Rdy"
-	}
-	checks := colHeaderStyle.Width(colChecks).Render(checksLabel)
+	review := colHeaderStyle.Width(colReview).Render("Review")
+	checks := colHeaderStyle.Width(colChecks).Render("Checks")
 
 	header := fmt.Sprintf("   %s %s %s %s %s %s %s",
 		st, num, title, author, age, review, checks)
@@ -202,7 +199,7 @@ func renderColumnHeader(tw int, section github.Section) string {
 	return header + "\n" + sep
 }
 
-func renderPRRow(pr github.PullRequest, tw int, section github.Section, isUnseen bool) string {
+func renderPRRow(pr github.PullRequest, tw int, isUnseen bool) string {
 	// Leading indicator: red bar for unseen, space otherwise
 	var lead string
 	if isUnseen {
@@ -234,12 +231,7 @@ func renderPRRow(pr github.PullRequest, tw int, section github.Section, isUnseen
 	rev := getReviewIcon(pr.ReviewStatus)
 	revCell := lipgloss.NewStyle().Width(colReview).Render(rev)
 
-	var lastColIcon string
-	if section == github.SectionCreated {
-		lastColIcon = getReadyIcon(pr)
-	} else {
-		lastColIcon = getChecksIcon(pr.ChecksState)
-	}
+	lastColIcon := getChecksIcon(pr.ChecksState)
 	lastColCell := lipgloss.NewStyle().Width(colChecks).Render(lastColIcon)
 
 	return fmt.Sprintf("%s%s %s %s %s %s %s %s",
@@ -257,6 +249,35 @@ func truncate(s string, max int) string {
 		}
 	}
 	return s
+}
+
+// truncateLeft drops runes from the start so the visible width fits in max,
+// prefixing with "…" to indicate the elision. Useful for paths where the tail
+// (deepest directory or filename) is the most identifying part.
+func truncateLeft(s string, max int) string {
+	if max <= 1 {
+		return "…"
+	}
+	if lipgloss.Width(s) <= max {
+		return s
+	}
+	// Walk runes from the end until "…" + suffix fits in max.
+	suffixW := 0
+	cut := len(s)
+	for i := len(s); i > 0; {
+		_, sz := utf8.DecodeLastRuneInString(s[:i])
+		i -= sz
+		rw := lipgloss.Width(s[i : i+sz])
+		if rw == 0 {
+			rw = 1
+		}
+		if 1+suffixW+rw > max {
+			break
+		}
+		suffixW += rw
+		cut = i
+	}
+	return "…" + s[cut:]
 }
 
 func getStatusIcon(status github.PRStatus) string {
@@ -300,13 +321,6 @@ func getChecksIcon(state string) string {
 	default:
 		return lipgloss.NewStyle().Foreground(mutedColor).Render("·")
 	}
-}
-
-func getReadyIcon(pr github.PullRequest) string {
-	if pr.IsReadyToMerge() {
-		return lipgloss.NewStyle().Foreground(successColor).Render("✓")
-	}
-	return lipgloss.NewStyle().Foreground(dangerColor).Render("✗")
 }
 
 func sortByRepo(prs []github.PullRequest) {

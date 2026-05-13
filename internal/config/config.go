@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -122,6 +123,37 @@ func ConfigPath() (string, error) {
 	return primary, nil
 }
 
+// checkConfigSymlink refuses to load the config if `path` is a symlink whose
+// resolved target escapes the user's home directory. Same-filesystem symlinks
+// inside $HOME (e.g. a dotfiles repo at ~/dotfiles/glance/config.yaml) are
+// allowed. Returns nil if the path is a regular file or does not exist.
+func checkConfigSymlink(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		return nil
+	}
+	target, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return fmt.Errorf("resolving config symlink: %w", err)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	resolvedHome, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		resolvedHome = home
+	}
+	rel, err := filepath.Rel(resolvedHome, target)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return fmt.Errorf("refusing to read config: symlink target %q is outside $HOME", target)
+	}
+	return nil
+}
+
 // writeDefaultConfig writes the embedded default config template to the
 // primary config path. Returns the path written, or empty string on failure.
 func writeDefaultConfig() string {
@@ -129,11 +161,11 @@ func writeDefaultConfig() string {
 	if err != nil {
 		return ""
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return ""
 	}
 	path := filepath.Join(dir, "config.yaml")
-	if err := os.WriteFile(path, defaultConfigYAML, 0o644); err != nil {
+	if err := os.WriteFile(path, defaultConfigYAML, 0o600); err != nil {
 		return ""
 	}
 	return path
@@ -147,6 +179,9 @@ func Load() (Config, string, error) {
 	path, err := ConfigPath()
 	if err != nil {
 		return cfg, "", nil
+	}
+	if err := checkConfigSymlink(path); err != nil {
+		return cfg, "", err
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -168,7 +203,7 @@ func Save(cfg Config) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
 	data, err := yaml.Marshal(cfg)
@@ -176,5 +211,5 @@ func Save(cfg Config) error {
 		return err
 	}
 	path := filepath.Join(dir, "config.yaml")
-	return os.WriteFile(path, data, 0o644)
+	return os.WriteFile(path, data, 0o600)
 }

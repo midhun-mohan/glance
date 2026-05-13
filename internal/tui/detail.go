@@ -157,6 +157,26 @@ func (m Model) renderDetailError() string {
 
 // --- Split Screen ---
 
+// currentLeftPanelPct returns the active left-panel width percentage, falling
+// back to the 30% default when the user hasn't resized.
+func (m Model) currentLeftPanelPct() int {
+	if m.leftPanelPct == 0 {
+		return 30
+	}
+	return m.leftPanelPct
+}
+
+// clampLeftPanelPct keeps the user-adjustable split width inside a sane range.
+func clampLeftPanelPct(pct int) int {
+	if pct < 15 {
+		return 15
+	}
+	if pct > 60 {
+		return 60
+	}
+	return pct
+}
+
 func (m Model) renderSplitScreen() string {
 	d := m.detailData
 	totalW := m.width - 2 // outer border
@@ -183,12 +203,19 @@ func (m Model) renderSplitScreen() string {
 		panelH = 5
 	}
 
-	leftW := totalW * 30 / 100
-	if leftW < 20 {
-		leftW = 20
+	leftW := totalW * m.currentLeftPanelPct() / 100
+	// Hard floor for the file-list panel. The row layout is
+	// "  ICON NAME STATS" — with worst-case stats like "+9999 -9999" (11
+	// cells) and a 3-cell minimum name, the row needs 19 visible cells, plus
+	// 2 for the border = 21. Round up to 24 for a small safety margin so
+	// shrinking the split with `<` can't produce a panel whose rows wrap
+	// inside lipgloss and double the panel height.
+	if leftW < 24 {
+		leftW = 24
 	}
-	if leftW > 40 {
-		leftW = 40
+	if leftW > totalW-25 {
+		// Always leave at least 25 cols for the diff panel.
+		leftW = totalW - 25
 	}
 	rightW := totalW - leftW - 1 // 1 for vertical separator
 
@@ -287,15 +314,16 @@ func (m Model) renderDetailFooter(width int) string {
 	} else if m.detailRightTab == 0 {
 		nav = "↑↓ navigate  c comment  Tab switch"
 	} else if m.detailRightTab == 1 && m.detailData != nil && len(m.detailData.Checks) > 0 {
-		nav = "↑↓ scroll  J/K checks  o open check  Tab switch"
+		nav = "↑↓ checks  o open check  Tab switch"
 	} else {
 		nav = "↑↓ scroll  Tab switch"
 	}
 
-	actions := "c comment  A approve  X reject  W close/reopen  D draft"
+	actions := "c comment  A approve  X reject  E close/reopen  D draft"
 	if m.activeSection == github.SectionCreated {
 		actions += "  M merge"
 	}
+	actions += "  w wrap  <> resize"
 
 	hints := helpDescStyle.Render(nav + "  " + actions + "  i diff/info  o open  y copy  r refresh  Esc close")
 
@@ -326,8 +354,14 @@ func (m Model) renderFileListPanel(width, height int, d *github.PRDetail) string
 			if lastDir != "" {
 				lines = append(lines, "") // blank separator between groups
 			}
-			folderHeader := helpDescStyle.Render("📁 " + dir)
-			lines = append(lines, folderHeader)
+			// Truncate long directory paths so the header doesn't exceed the
+			// panel's content area — otherwise lipgloss wraps it and the panel
+			// renders taller than panelH, breaking the split-screen layout.
+			headerText := "📁 " + dir
+			if lipgloss.Width(headerText) > contentW {
+				headerText = truncateLeft(headerText, contentW)
+			}
+			lines = append(lines, helpDescStyle.Render(headerText))
 			lastDir = dir
 		}
 
@@ -336,11 +370,17 @@ func (m Model) renderFileListPanel(width, height int, d *github.PRDetail) string
 		delStat := lipgloss.NewStyle().Foreground(dangerColor).Render(fmt.Sprintf("-%d", f.Deletions))
 		stats := addStat + " " + delStat
 
-		name := filepath.Base(f.Filename)
-		nameW := contentW - 14 // icon + indent + stats
-		if nameW < 10 {
-			nameW = 10
+		// Row layout: "  ICON NAME STATS" — overhead is 5 cells (2 lead + icon
+		// + 2 spaces) plus the visible width of stats. nameW must be small
+		// enough that the row fits within contentW even when the user has
+		// shrunk the split panel; otherwise lipgloss wraps the row inside the
+		// panel and the file-list height balloons past panelH.
+		statsW := lipgloss.Width(stats)
+		nameW := contentW - 5 - statsW
+		if nameW < 3 {
+			nameW = 3
 		}
+		name := filepath.Base(f.Filename)
 		if len(name) > nameW {
 			name = "…" + name[len(name)-nameW+1:]
 		}
@@ -403,12 +443,28 @@ func (m Model) renderDiffPanel(width, height int, d *github.PRDetail) string {
 
 	var lines []string
 
-	// File header
+	// File header. Truncate the filename so the header stays within contentW —
+	// otherwise lipgloss wraps it inside the panel and the split-screen layout
+	// breaks for deeply-nested paths.
 	icon := fileStatusIcon(f.Status)
-	stats := helpDescStyle.Render(fmt.Sprintf("+%d -%d", f.Additions, f.Deletions))
-	lines = append(lines, detailSectionStyle.Render(icon+"  "+f.Filename)+"  "+stats)
+	statsText := fmt.Sprintf("+%d -%d", f.Additions, f.Deletions)
+	stats := helpDescStyle.Render(statsText)
+	// header overhead: icon (1) + 2 spaces + 2 spaces + stats width.
+	nameMax := contentW - 1 - 2 - 2 - lipgloss.Width(statsText)
+	if nameMax < 10 {
+		nameMax = 10
+	}
+	displayName := f.Filename
+	if lipgloss.Width(displayName) > nameMax {
+		displayName = truncateLeft(displayName, nameMax)
+	}
+	lines = append(lines, detailSectionStyle.Render(icon+"  "+displayName)+"  "+stats)
 	if f.PreviousFilename != "" {
-		lines = append(lines, detailBodyStyle.Render("renamed from "+f.PreviousFilename))
+		prev := "renamed from " + f.PreviousFilename
+		if lipgloss.Width(prev) > contentW {
+			prev = truncateLeft(prev, contentW)
+		}
+		lines = append(lines, detailBodyStyle.Render(prev))
 	}
 	lines = append(lines, panelHeaderSep.Render(strings.Repeat("─", contentW)))
 
@@ -425,16 +481,23 @@ func (m Model) renderDiffPanel(width, height int, d *github.PRDetail) string {
 		cursorRenderLine := -1
 
 		for i, dl := range patchLines {
-			dl = sanitizeDiffLine(dl, contentW)
-			styled := styleDiffLine(dl)
-
-			// Show cursor highlight when diff panel is focused
-			if isFocused && i == m.diffCursor {
+			// In wrap mode, one source diff line can become several visual
+			// rows; in truncate mode there's always exactly one. Either way,
+			// the cursor highlight is applied to every visual row for the
+			// source line at m.diffCursor so the highlight covers the full
+			// wrapped block.
+			visualRows := diffLineVisualRows(dl, contentW, m.diffWrap)
+			isCursor := isFocused && i == m.diffCursor
+			if isCursor {
 				cursorRenderLine = len(lines)
-				styled = padAndHighlight(dl, contentW, diffCursorStyle)
 			}
-
-			lines = append(lines, styled)
+			for _, vr := range visualRows {
+				if isCursor {
+					lines = append(lines, padAndHighlight(vr, contentW, diffCursorStyle))
+				} else {
+					lines = append(lines, styleDiffLine(vr))
+				}
+			}
 
 			// Show comment input below cursor line
 			if m.commentMode && i == m.diffCursor {
@@ -568,118 +631,8 @@ func formatCommentAge(t time.Time) string {
 // --- Right Panel: Info (PR details, reviews, checks) ---
 
 func (m Model) renderInfoPanel(width, height int, d *github.PRDetail) string {
-	contentW := width - 4
+	lines, selectedCheckLine := m.buildInfoLines(width)
 
-	var lines []string
-
-	// Metadata
-	addField := func(label, value string) {
-		l := helpKeyStyle.Width(12).Render(label)
-		v := lipgloss.NewStyle().Foreground(lipgloss.Color("#D1D5DB")).Render(value)
-		lines = append(lines, l+" "+v)
-	}
-
-	addField("Author", d.Author)
-	if len(d.Assignees) > 0 {
-		addField("Assignees", strings.Join(d.Assignees, ", "))
-	}
-	if len(d.Labels) > 0 {
-		addField("Labels", strings.Join(d.Labels, ", "))
-	}
-	addField("Created", d.CreatedAt.Format("2006-01-02"))
-	addField("Updated", d.UpdatedAt.Format("2006-01-02"))
-	if d.MergedAt != nil {
-		addField("Merged", d.MergedAt.Format("2006-01-02")+" by "+d.MergedBy)
-	}
-	if d.Mergeable != "" && d.State != "MERGED" {
-		addField("Mergeable", d.Mergeable)
-	}
-	if d.CommentsCount > 0 {
-		addField("Comments", fmt.Sprintf("%d", d.CommentsCount))
-	}
-
-	// Description
-	lines = append(lines, "")
-	lines = append(lines, detailSectionStyle.Render("Description"))
-	if d.Body == "" {
-		lines = append(lines, detailBodyStyle.Render("No description provided."))
-	} else {
-		for _, wl := range wrapText(d.Body, contentW) {
-			lines = append(lines, detailBodyStyle.Render(wl))
-		}
-	}
-
-	// Reviews
-	if len(d.Reviews) > 0 {
-		lines = append(lines, "")
-		lines = append(lines, detailSectionStyle.Render("Reviews"))
-		for _, r := range d.Reviews {
-			icon := reviewStateIcon(r.State)
-			name := lipgloss.NewStyle().Width(16).Render(r.Author)
-			state := detailBodyStyle.Render(r.State)
-			lines = append(lines, icon+" "+name+" "+state)
-		}
-	}
-
-	// Comments
-	if len(d.Comments) > 0 {
-		lines = append(lines, "")
-		lines = append(lines, detailSectionStyle.Render(
-			fmt.Sprintf("Comments (%d)", len(d.Comments))))
-		for _, c := range d.Comments {
-			age := formatCommentAge(c.CreatedAt)
-			header := commentHeaderStyle.Render(
-				fmt.Sprintf("  @%s (%s)", c.Author, age))
-			lines = append(lines, header)
-			for _, wl := range wrapText(c.Body, contentW-4) {
-				lines = append(lines, "  "+styleCommentLine(wl))
-			}
-			lines = append(lines, "") // blank line between comments
-		}
-	}
-
-	// Checks
-	selectedCheckLine := -1
-	if len(d.Checks) > 0 {
-		passed := 0
-		for _, ch := range d.Checks {
-			if ch.Status == github.CheckSuccess {
-				passed++
-			}
-		}
-		lines = append(lines, "")
-		checksHeader := fmt.Sprintf("Checks (%d/%d passed)", passed, len(d.Checks))
-		if m.detailFocus == 1 && m.detailRightTab == 1 {
-			checksHeader += "  ↑↓ navigate  o open"
-		}
-		lines = append(lines, detailSectionStyle.Render(checksHeader))
-		for i, ch := range d.Checks {
-			icon := checkIcon(ch.Status)
-			nameW := contentW - 20
-			if nameW < 10 {
-				nameW = 10
-			}
-			name := ch.Name
-			if len(name) > nameW {
-				name = name[:nameW-1] + "…"
-			}
-			nameStr := lipgloss.NewStyle().Width(nameW).Render(name)
-			status := detailBodyStyle.Render(string(ch.Status))
-			row := icon + " " + nameStr + " " + status
-			if i == m.checkCursor && m.detailFocus == 1 && m.detailRightTab == 1 {
-				selectedCheckLine = len(lines)
-				if m.checkNoURL {
-					row = padAndHighlight(row, contentW, lipgloss.NewStyle().Background(lipgloss.Color("#7F1D1D")))
-					row += "\n" + lipgloss.NewStyle().Foreground(dangerColor).Render("  No URL available")
-				} else {
-					row = padAndHighlight(row, contentW, selectedPRStyle)
-				}
-			}
-			lines = append(lines, row)
-		}
-	}
-
-	// Scrolling — auto-scroll to keep selected check visible
 	visH := height - 2
 	if visH < 3 {
 		visH = 3
@@ -714,6 +667,177 @@ func (m Model) renderInfoPanel(width, height int, d *github.PRDetail) string {
 	visible := lines[scroll:end]
 
 	return strings.Join(visible, "\n")
+}
+
+// buildInfoLines builds every rendered line for the Info panel (metadata,
+// description, reviews, comments, checks) and returns the rendered index of
+// the currently selected check, or -1 if none. The scroll/clip step is done
+// separately so this function can be called from key handlers to clamp scroll.
+func (m Model) buildInfoLines(width int) ([]string, int) {
+	d := m.detailData
+	if d == nil {
+		return nil, -1
+	}
+	contentW := width - 4
+
+	var lines []string
+
+	addField := func(label, value string) {
+		l := helpKeyStyle.Width(12).Render(label)
+		v := lipgloss.NewStyle().Foreground(lipgloss.Color("#D1D5DB")).Render(value)
+		lines = append(lines, l+" "+v)
+	}
+
+	addField("Author", d.Author)
+	if len(d.Assignees) > 0 {
+		addField("Assignees", strings.Join(d.Assignees, ", "))
+	}
+	if len(d.Labels) > 0 {
+		addField("Labels", strings.Join(d.Labels, ", "))
+	}
+	addField("Created", d.CreatedAt.Format("2006-01-02"))
+	addField("Updated", d.UpdatedAt.Format("2006-01-02"))
+	if d.MergedAt != nil {
+		addField("Merged", d.MergedAt.Format("2006-01-02")+" by "+d.MergedBy)
+	}
+	if d.Mergeable != "" && d.State != "MERGED" {
+		addField("Mergeable", d.Mergeable)
+	}
+	if d.CommentsCount > 0 {
+		addField("Comments", fmt.Sprintf("%d", d.CommentsCount))
+	}
+
+	lines = append(lines, "")
+	lines = append(lines, detailSectionStyle.Render("Description"))
+	if d.Body == "" {
+		lines = append(lines, detailBodyStyle.Render("No description provided."))
+	} else {
+		for _, wl := range wrapText(d.Body, contentW) {
+			lines = append(lines, detailBodyStyle.Render(wl))
+		}
+	}
+
+	if len(d.Reviews) > 0 {
+		lines = append(lines, "")
+		lines = append(lines, detailSectionStyle.Render("Reviews"))
+		for _, r := range d.Reviews {
+			icon := reviewStateIcon(r.State)
+			name := lipgloss.NewStyle().Width(16).Render(r.Author)
+			state := detailBodyStyle.Render(r.State)
+			lines = append(lines, icon+" "+name+" "+state)
+		}
+	}
+
+	if len(d.Comments) > 0 {
+		lines = append(lines, "")
+		lines = append(lines, detailSectionStyle.Render(
+			fmt.Sprintf("Comments (%d)", len(d.Comments))))
+		for _, c := range d.Comments {
+			age := formatCommentAge(c.CreatedAt)
+			header := commentHeaderStyle.Render(
+				fmt.Sprintf("  @%s (%s)", c.Author, age))
+			lines = append(lines, header)
+			for _, wl := range wrapText(c.Body, contentW-4) {
+				lines = append(lines, "  "+styleCommentLine(wl))
+			}
+			lines = append(lines, "")
+		}
+	}
+
+	selectedCheckLine := -1
+	if len(d.Checks) > 0 {
+		passed := 0
+		for _, ch := range d.Checks {
+			if ch.Status == github.CheckSuccess {
+				passed++
+			}
+		}
+		lines = append(lines, "")
+		checksHeader := fmt.Sprintf("Checks (%d/%d passed)", passed, len(d.Checks))
+		if m.detailFocus == 1 && m.detailRightTab == 1 {
+			checksHeader += "  ↑↓ navigate  o open"
+		}
+		lines = append(lines, detailSectionStyle.Render(checksHeader))
+		for i, ch := range d.Checks {
+			icon := checkIcon(ch.Status)
+			nameW := contentW - 20
+			if nameW < 10 {
+				nameW = 10
+			}
+			name := ch.Name
+			if len(name) > nameW {
+				name = name[:nameW-1] + "…"
+			}
+			nameStr := lipgloss.NewStyle().Width(nameW).Render(name)
+			status := detailBodyStyle.Render(string(ch.Status))
+			row := icon + " " + nameStr + " " + status
+			if i == m.checkCursor && m.detailFocus == 1 && m.detailRightTab == 1 {
+				selectedCheckLine = len(lines)
+				switch {
+				case m.checkNoURL:
+					row = padAndHighlight(row, contentW, lipgloss.NewStyle().Background(lipgloss.Color("#7F1D1D")))
+					row += "\n" + lipgloss.NewStyle().Foreground(dangerColor).Render("  No URL available")
+				case m.checkUnsafeURL:
+					row = padAndHighlight(row, contentW, lipgloss.NewStyle().Background(lipgloss.Color("#7F1D1D")))
+					row += "\n" + lipgloss.NewStyle().Foreground(dangerColor).Render("  Unsafe URL — refused to open")
+				default:
+					row = padAndHighlight(row, contentW, selectedPRStyle)
+				}
+			}
+			lines = append(lines, row)
+		}
+	}
+
+	return lines, selectedCheckLine
+}
+
+// infoPanelSize returns the (width, height) of the right detail panel,
+// matching the math in renderSplitScreen so callers can compute scroll bounds.
+func (m Model) infoPanelSize() (int, int) {
+	totalW := m.width - 2
+	totalH := m.height - 2
+	if totalW < 40 {
+		totalW = 40
+	}
+	if totalH < 10 {
+		totalH = 10
+	}
+	header := m.renderDetailHeader(totalW)
+	headerH := lipgloss.Height(header)
+	footer := m.renderDetailFooter(totalW)
+	footerH := lipgloss.Height(footer)
+	panelH := totalH - headerH - footerH - 2
+	if panelH < 5 {
+		panelH = 5
+	}
+	leftW := totalW * 30 / 100
+	if leftW < 20 {
+		leftW = 20
+	}
+	if leftW > 40 {
+		leftW = 40
+	}
+	rightW := totalW - leftW - 1
+	return rightW, panelH
+}
+
+// infoMaxScroll returns the largest valid value for m.infoScroll given the
+// current panel size and content. Used by handlers to clamp scroll state.
+func (m Model) infoMaxScroll() int {
+	if m.detailData == nil {
+		return 0
+	}
+	rw, rh := m.infoPanelSize()
+	lines, _ := m.buildInfoLines(rw)
+	visH := rh - 2
+	if visH < 3 {
+		visH = 3
+	}
+	max := len(lines) - visH
+	if max < 0 {
+		max = 0
+	}
+	return max
 }
 
 // --- Shared helpers ---
@@ -795,6 +919,53 @@ func fileStatusIcon(status string) string {
 	}
 }
 
+// diffLineVisualRows converts one raw patch line into the visual rows it
+// should occupy on screen. When wrap=false it returns a single truncated row;
+// when wrap=true the line is split into rune chunks of at most maxWidth visible
+// cells, with the diff prefix (+, -, space) repeated on each continuation row
+// so add/delete coloring still applies after wrapping.
+func diffLineVisualRows(line string, maxWidth int, wrap bool) []string {
+	// Normalize tabs and stray control chars first, matching sanitizeDiffLine.
+	line = strings.ReplaceAll(line, "\t", "    ")
+	line = strings.Map(func(r rune) rune {
+		if r < 32 && r != '\n' {
+			return ' '
+		}
+		return r
+	}, line)
+	if !wrap {
+		if lipgloss.Width(line) > maxWidth {
+			line = truncate(line, maxWidth)
+		}
+		return []string{line}
+	}
+	if lipgloss.Width(line) <= maxWidth {
+		return []string{line}
+	}
+	// Continuation rows reuse the leading +/-/space so the diff color stays
+	// consistent. Hunk headers (@@) and the first row keep their natural prefix.
+	var contPrefix string
+	if len(line) > 0 {
+		switch line[0] {
+		case '+', '-', ' ':
+			contPrefix = string(line[0])
+		}
+	}
+	var rows []string
+	first, rest := splitByWidth(line, maxWidth)
+	rows = append(rows, first)
+	for lipgloss.Width(rest) > 0 {
+		chunkMax := maxWidth - lipgloss.Width(contPrefix)
+		if chunkMax < 1 {
+			chunkMax = 1
+		}
+		chunk, more := splitByWidth(rest, chunkMax)
+		rows = append(rows, contPrefix+chunk)
+		rest = more
+	}
+	return rows
+}
+
 // sanitizeDiffLine replaces tabs with spaces and truncates to maxWidth
 // using visible-width-aware logic (not byte slicing).
 func sanitizeDiffLine(line string, maxWidth int) string {
@@ -864,9 +1035,22 @@ func wrapText(text string, maxWidth int) []string {
 			result = append(result, "")
 			continue
 		}
-		line := words[0]
-		for _, w := range words[1:] {
-			if len(line)+1+len(w) > maxWidth {
+		var line string
+		for _, w := range words {
+			// Hard-break words that are wider than maxWidth (long URLs,
+			// unbroken identifiers) so they don't overflow the container.
+			for lipgloss.Width(w) > maxWidth {
+				prefix, rest := splitByWidth(w, maxWidth)
+				if line != "" {
+					result = append(result, line)
+					line = ""
+				}
+				result = append(result, prefix)
+				w = rest
+			}
+			if line == "" {
+				line = w
+			} else if lipgloss.Width(line)+1+lipgloss.Width(w) > maxWidth {
 				result = append(result, line)
 				line = w
 			} else {
@@ -876,4 +1060,21 @@ func wrapText(text string, maxWidth int) []string {
 		result = append(result, line)
 	}
 	return result
+}
+
+// splitByWidth returns the longest prefix of s with visible width <= maxWidth,
+// and the remainder. Rune-aware.
+func splitByWidth(s string, maxWidth int) (string, string) {
+	w := 0
+	for i, r := range s {
+		rw := lipgloss.Width(string(r))
+		if rw == 0 {
+			rw = 1
+		}
+		if w+rw > maxWidth {
+			return s[:i], s[i:]
+		}
+		w += rw
+	}
+	return s, ""
 }

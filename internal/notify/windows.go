@@ -25,8 +25,6 @@ func (b *windowsBackend) Send(title, message string) error {
 }
 
 func escapePowerShell(s string) string {
-	s = strings.ReplaceAll(s, "'", "''")
-	s = strings.ReplaceAll(s, "`", "``")
-	s = strings.ReplaceAll(s, "$", "`$")
-	return s
+	// Inside PowerShell single-quoted strings only `'` is special; `$` and backtick are literal.
+	return strings.ReplaceAll(s, "'", "''")
 }

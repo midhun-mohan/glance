@@ -8,14 +8,18 @@ import (
 type macOSBackend struct{}
 
 func (b *macOSBackend) Send(title, message string) error {
-	app := terminalAppName()
-	script := `tell application "` + escapeOsascript(app) + `" to display notification "` + escapeOsascript(message) + `" with title "` + escapeOsascript(title) + `"`
+	// Plain osascript. We deliberately do NOT wrap this in `tell application "X" to ...`
+	// AppleScript's `display notification` is always handled by the scripting
+	// host regardless of the surrounding tell block, so the wrapper does not
+	// route the notification through the target app and can make macOS surface
+	// "Script Editor" when the user clicks the banner.
+	script := `display notification "` + escapeOsascript(message) + `" with title "` + escapeOsascript(title) + `"`
 	return exec.Command("osascript", "-e", script).Run()
 }
 
-// terminalAppName returns the macOS app name of the running terminal so that
-// clicking a notification brings the terminal to the front instead of opening
-// Script Editor.
+// terminalAppName returns the macOS app name of the running terminal. Kept for
+// potential future use; not currently invoked because the `tell application`
+// wrapper does not actually route `display notification` through the target.
 func terminalAppName() string {
 	switch os.Getenv("TERM_PROGRAM") {
 	case "ghostty":
@@ -34,13 +38,16 @@ func terminalAppName() string {
 func escapeOsascript(s string) string {
 	result := make([]byte, 0, len(s))
 	for i := 0; i < len(s); i++ {
-		switch s[i] {
-		case '"':
+		c := s[i]
+		switch {
+		case c == '"':
 			result = append(result, '\\', '"')
-		case '\\':
+		case c == '\\':
 			result = append(result, '\\', '\\')
+		case c < 0x20:
+			result = append(result, ' ')
 		default:
-			result = append(result, s[i])
+			result = append(result, c)
 		}
 	}
 	return string(result)

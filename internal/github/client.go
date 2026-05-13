@@ -6,13 +6,16 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	urlpkg "net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
 type Client struct {
 	token      string
 	httpClient *http.Client
+	usernameMu sync.Mutex
 	username   string
 }
 
@@ -87,6 +90,8 @@ func (c *Client) graphQL(query string, variables map[string]interface{}, result 
 }
 
 func (c *Client) GetUsername() (string, error) {
+	c.usernameMu.Lock()
+	defer c.usernameMu.Unlock()
 	if c.username != "" {
 		return c.username, nil
 	}
@@ -311,20 +316,20 @@ func (c *Client) searchPRs(searchQuery string) ([]PullRequest, error) {
 			}
 		}
 		pr := PullRequest{
-			Title:              node.Title,
+			Title:              sanitizeForTerminal(node.Title),
 			Number:             node.Number,
-			Repository:         node.Repository.NameWithOwner,
-			Author:             author,
-			URL:                node.URL,
+			Repository:         sanitizeForTerminal(node.Repository.NameWithOwner),
+			Author:             sanitizeForTerminal(author),
+			URL:                sanitizeForTerminal(node.URL),
 			CreatedAt:          node.CreatedAt,
 			UpdatedAt:          node.UpdatedAt,
 			IsDraft:            node.IsDraft,
-			Labels:             labels,
+			Labels:             sanitizeSliceInPlace(labels),
 			Status:             mapPRStatus(node.State, node.IsDraft),
 			ReviewStatus:       mapReviewStatus(node.ReviewDecision),
-			ChecksState:        checksState,
-			Assignees:          assignees,
-			RequestedReviewers: reviewers,
+			ChecksState:        sanitizeForTerminal(checksState),
+			Assignees:          sanitizeSliceInPlace(assignees),
+			RequestedReviewers: sanitizeSliceInPlace(reviewers),
 		}
 		prs = append(prs, pr)
 	}
@@ -486,43 +491,43 @@ func (c *Client) FetchPRDetail(owner, repo string, number int) (*PRDetail, error
 	pr := result.Repository.PullRequest
 
 	detail := &PRDetail{
-		Title:          pr.Title,
-		Body:           pr.Body,
+		Title:          sanitizeForTerminal(pr.Title),
+		Body:           sanitizeForTerminal(pr.Body),
 		Number:         pr.Number,
-		URL:            pr.URL,
-		NodeID:         pr.ID,
-		State:          pr.State,
+		URL:            sanitizeForTerminal(pr.URL),
+		NodeID:         sanitizeForTerminal(pr.ID),
+		State:          sanitizeForTerminal(pr.State),
 		IsDraft:        pr.IsDraft,
-		Mergeable:      pr.Mergeable,
+		Mergeable:      sanitizeForTerminal(pr.Mergeable),
 		Additions:      pr.Additions,
 		Deletions:      pr.Deletions,
 		ChangedFiles:   pr.ChangedFiles,
-		BaseRefName:    pr.BaseRefName,
-		HeadRefName:    pr.HeadRefName,
+		BaseRefName:    sanitizeForTerminal(pr.BaseRefName),
+		HeadRefName:    sanitizeForTerminal(pr.HeadRefName),
 		CreatedAt:      pr.CreatedAt,
 		UpdatedAt:      pr.UpdatedAt,
 		MergedAt:       pr.MergedAt,
-		ReviewDecision: pr.ReviewDecision,
+		ReviewDecision: sanitizeForTerminal(pr.ReviewDecision),
 		CommentsCount:  pr.Comments.TotalCount,
-		Repository:     owner + "/" + repo,
+		Repository:     sanitizeForTerminal(owner + "/" + repo),
 	}
 
 	if len(pr.Commits.Nodes) > 0 {
-		detail.HeadCommitSHA = pr.Commits.Nodes[0].Commit.Oid
+		detail.HeadCommitSHA = sanitizeForTerminal(pr.Commits.Nodes[0].Commit.Oid)
 	}
 
 	if pr.Author != nil {
-		detail.Author = pr.Author.Login
+		detail.Author = sanitizeForTerminal(pr.Author.Login)
 	}
 	if pr.MergedBy != nil {
-		detail.MergedBy = pr.MergedBy.Login
+		detail.MergedBy = sanitizeForTerminal(pr.MergedBy.Login)
 	}
 
 	for _, a := range pr.Assignees.Nodes {
-		detail.Assignees = append(detail.Assignees, a.Login)
+		detail.Assignees = append(detail.Assignees, sanitizeForTerminal(a.Login))
 	}
 	for _, l := range pr.Labels.Nodes {
-		detail.Labels = append(detail.Labels, l.Name)
+		detail.Labels = append(detail.Labels, sanitizeForTerminal(l.Name))
 	}
 
 	// De-duplicate reviews by author (keep latest)
@@ -538,7 +543,10 @@ func (c *Client) FetchPRDetail(owner, repo string, number int) (*PRDetail, error
 		reviewMap[r.Author.Login] = r.State
 	}
 	for _, author := range reviewOrder {
-		detail.Reviews = append(detail.Reviews, ReviewEntry{Author: author, State: reviewMap[author]})
+		detail.Reviews = append(detail.Reviews, ReviewEntry{
+			Author: sanitizeForTerminal(author),
+			State:  sanitizeForTerminal(reviewMap[author]),
+		})
 	}
 
 	// Parse check statuses
@@ -548,13 +556,13 @@ func (c *Client) FetchPRDetail(owner, repo string, number int) (*PRDetail, error
 			for _, ctx := range rollup.Contexts.Nodes {
 				var check CheckRun
 				if ctx.Typename == "CheckRun" {
-					check.Name = ctx.Name
+					check.Name = sanitizeForTerminal(ctx.Name)
 					check.Status = mapCheckRunStatus(ctx.Status, ctx.Conclusion)
-					check.URL = ctx.DetailsURL
+					check.URL = sanitizeForTerminal(ctx.DetailsURL)
 				} else if ctx.Typename == "StatusContext" {
-					check.Name = ctx.Context
+					check.Name = sanitizeForTerminal(ctx.Context)
 					check.Status = mapStatusContextState(ctx.State)
-					check.URL = ctx.TargetURL
+					check.URL = sanitizeForTerminal(ctx.TargetURL)
 				} else {
 					continue
 				}
@@ -568,7 +576,7 @@ func (c *Client) FetchPRDetail(owner, repo string, number int) (*PRDetail, error
 
 // FetchPRFiles fetches the file-level diffs for a PR via the REST API.
 func (c *Client) FetchPRFiles(owner, repo string, number int) ([]ChangedFile, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%d/files?per_page=100", owner, repo, number)
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%d/files?per_page=100", urlpkg.PathEscape(owner), urlpkg.PathEscape(repo), number)
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
@@ -607,12 +615,12 @@ func (c *Client) FetchPRFiles(owner, repo string, number int) ([]ChangedFile, er
 	files := make([]ChangedFile, len(rawFiles))
 	for i, f := range rawFiles {
 		files[i] = ChangedFile{
-			Filename:         f.Filename,
-			Status:           f.Status,
+			Filename:         sanitizeForTerminal(f.Filename),
+			Status:           sanitizeForTerminal(f.Status),
 			Additions:        f.Additions,
 			Deletions:        f.Deletions,
-			Patch:            f.Patch,
-			PreviousFilename: f.PreviousFilename,
+			Patch:            sanitizeForTerminal(f.Patch),
+			PreviousFilename: sanitizeForTerminal(f.PreviousFilename),
 		}
 	}
 	return files, nil
@@ -620,7 +628,7 @@ func (c *Client) FetchPRFiles(owner, repo string, number int) ([]ChangedFile, er
 
 // FetchPRReviewComments fetches inline review comments for a PR via the REST API.
 func (c *Client) FetchPRReviewComments(owner, repo string, number int) ([]ReviewComment, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%d/comments?per_page=100", owner, repo, number)
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%d/comments?per_page=100", urlpkg.PathEscape(owner), urlpkg.PathEscape(repo), number)
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
@@ -670,10 +678,10 @@ func (c *Client) FetchPRReviewComments(owner, repo string, number int) ([]Review
 			author = r.User.Login
 		}
 		c := ReviewComment{
-			Author:    author,
-			Body:      r.Body,
-			Path:      r.Path,
-			Side:      r.Side,
+			Author:    sanitizeForTerminal(author),
+			Body:      sanitizeForTerminal(r.Body),
+			Path:      sanitizeForTerminal(r.Path),
+			Side:      sanitizeForTerminal(r.Side),
 			CreatedAt: r.CreatedAt,
 		}
 		if r.Line != nil {
@@ -690,7 +698,7 @@ func (c *Client) FetchPRReviewComments(owner, repo string, number int) ([]Review
 // CreateReviewComment creates a single inline review comment on a PR.
 // position is the 1-based line index in the diff (first @@ line = 1).
 func (c *Client) CreateReviewComment(owner, repo string, number int, commitSHA, path, body string, position int) error {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%d/comments", owner, repo, number)
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%d/comments", urlpkg.PathEscape(owner), urlpkg.PathEscape(repo), number)
 
 	payload := map[string]interface{}{
 		"body":      body,
@@ -719,14 +727,14 @@ func (c *Client) CreateReviewComment(owner, repo string, number int, commitSHA, 
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("GitHub API error %d: %s", resp.StatusCode, string(respBody))
+		return fmt.Errorf("GitHub API error %d: %s", resp.StatusCode, sanitizeErrorBody(respBody))
 	}
 	return nil
 }
 
 // FetchPRComments fetches general (non-review) comments on a PR via the REST API.
 func (c *Client) FetchPRComments(owner, repo string, number int) ([]PRComment, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/issues/%d/comments?per_page=100", owner, repo, number)
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/issues/%d/comments?per_page=100", urlpkg.PathEscape(owner), urlpkg.PathEscape(repo), number)
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
@@ -768,8 +776,8 @@ func (c *Client) FetchPRComments(owner, repo string, number int) ([]PRComment, e
 			author = r.User.Login
 		}
 		comments = append(comments, PRComment{
-			Author:    author,
-			Body:      r.Body,
+			Author:    sanitizeForTerminal(author),
+			Body:      sanitizeForTerminal(r.Body),
 			CreatedAt: r.CreatedAt,
 		})
 	}
@@ -778,7 +786,7 @@ func (c *Client) FetchPRComments(owner, repo string, number int) ([]PRComment, e
 
 // CreatePRComment creates a general comment on a PR (not tied to a specific line).
 func (c *Client) CreatePRComment(owner, repo string, number int, body string) error {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/issues/%d/comments", owner, repo, number)
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/issues/%d/comments", urlpkg.PathEscape(owner), urlpkg.PathEscape(repo), number)
 
 	payload := map[string]string{"body": body}
 	jsonBody, err := json.Marshal(payload)
@@ -802,7 +810,7 @@ func (c *Client) CreatePRComment(owner, repo string, number int, body string) er
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("GitHub API error %d: %s", resp.StatusCode, string(respBody))
+		return fmt.Errorf("GitHub API error %d: %s", resp.StatusCode, sanitizeErrorBody(respBody))
 	}
 	return nil
 }
@@ -878,7 +886,7 @@ func (c *Client) RequestChangesPR(owner, repo string, number int, body string) e
 }
 
 func (c *Client) submitReview(owner, repo string, number int, event, body string) error {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%d/reviews", owner, repo, number)
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%d/reviews", urlpkg.PathEscape(owner), urlpkg.PathEscape(repo), number)
 
 	payload := map[string]string{
 		"event": event,
@@ -905,14 +913,14 @@ func (c *Client) submitReview(owner, repo string, number int, event, body string
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("GitHub API error %d: %s", resp.StatusCode, string(respBody))
+		return fmt.Errorf("GitHub API error %d: %s", resp.StatusCode, sanitizeErrorBody(respBody))
 	}
 	return nil
 }
 
 // MergePR squash-merges a pull request.
 func (c *Client) MergePR(owner, repo string, number int, commitTitle string) error {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%d/merge", owner, repo, number)
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%d/merge", urlpkg.PathEscape(owner), urlpkg.PathEscape(repo), number)
 
 	payload := map[string]string{
 		"merge_method": "squash",
@@ -939,7 +947,7 @@ func (c *Client) MergePR(owner, repo string, number int, commitTitle string) err
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("GitHub API error %d: %s", resp.StatusCode, string(respBody))
+		return fmt.Errorf("GitHub API error %d: %s", resp.StatusCode, sanitizeErrorBody(respBody))
 	}
 	return nil
 }
@@ -955,7 +963,7 @@ func (c *Client) ReopenPR(owner, repo string, number int) error {
 }
 
 func (c *Client) updatePRState(owner, repo string, number int, state string) error {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%d", owner, repo, number)
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%d", urlpkg.PathEscape(owner), urlpkg.PathEscape(repo), number)
 
 	payload := map[string]string{"state": state}
 	jsonBody, err := json.Marshal(payload)
@@ -979,7 +987,7 @@ func (c *Client) updatePRState(owner, repo string, number int, state string) err
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("GitHub API error %d: %s", resp.StatusCode, string(respBody))
+		return fmt.Errorf("GitHub API error %d: %s", resp.StatusCode, sanitizeErrorBody(respBody))
 	}
 	return nil
 }

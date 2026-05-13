@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"net/url"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -77,10 +78,13 @@ type Model struct {
 	fileCursor     int // selected file in left panel
 	fileListScroll int // scroll offset for file list
 	diffScroll     int // scroll offset for diff
-	infoScroll     int // scroll offset for info panel
+	infoScroll     int // scroll offset for info panel (fallback when no checks)
 	checkCursor    int // selected check in info panel checks section
 	checkNoURL     bool // briefly show "No URL available" message
+	checkUnsafeURL bool // briefly show "Unsafe URL — refused to open" message
 	diffCursor     int  // line-level cursor in diff panel
+	diffWrap       bool // wrap long diff lines instead of truncating ('w' toggle)
+	leftPanelPct   int  // detail-view left panel width as a percent of totalW; 0 = default
 	commentMode    bool // typing a review comment
 	commentInput   string
 	commentLoading bool
@@ -142,6 +146,8 @@ type confirmContext struct {
 }
 
 type clearCheckNoURLMsg struct{}
+
+type clearCheckUnsafeURLMsg struct{}
 
 type commentResultMsg struct {
 	success bool
@@ -292,6 +298,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case clearCheckNoURLMsg:
 		m.checkNoURL = false
+		return m, nil
+
+	case clearCheckUnsafeURLMsg:
+		m.checkUnsafeURL = false
 		return m, nil
 
 	case commentResultMsg:
@@ -538,6 +548,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.infoScroll = 0
 				m.checkCursor = 0
 				m.checkNoURL = false
+				m.checkUnsafeURL = false
 				m.diffCursor = 0
 				m.commentMode = false
 				m.commentInput = ""
@@ -834,12 +845,16 @@ func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// Context-aware: open check URL when info panel is focused with checks
 			if m.detailFocus == 1 && m.detailRightTab == 1 && len(m.detailData.Checks) > 0 {
 				ch := m.detailData.Checks[m.checkCursor]
-				if ch.URL != "" {
-					openBrowser(ch.URL)
-				} else {
+				if ch.URL == "" {
 					m.checkNoURL = true
 					return m, tea.Tick(2*time.Second, func(t time.Time) tea.Msg {
 						return clearCheckNoURLMsg{}
+					})
+				}
+				if !openBrowser(ch.URL) {
+					m.checkUnsafeURL = true
+					return m, tea.Tick(2*time.Second, func(t time.Time) tea.Msg {
+						return clearCheckUnsafeURLMsg{}
 					})
 				}
 			} else {
@@ -856,6 +871,7 @@ func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.detailRightTab == 0 {
 			m.detailRightTab = 1
 			m.infoScroll = 0
+			m.checkCursor = 0
 		} else {
 			m.detailRightTab = 0
 			m.diffScroll = 0
@@ -916,8 +932,8 @@ func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
-	case "W":
-		// Close or reopen PR
+	case "E":
+		// Close or reopen PR (E = end the PR's life / reopen it)
 		if m.detailData != nil && m.detailData.State != "MERGED" {
 			owner, repo := github.SplitOwnerRepo(m.detailData.Repository)
 			if m.detailData.State == "CLOSED" {
@@ -934,6 +950,22 @@ func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				nodeID: m.detailData.NodeID,
 			}
 		}
+		return m, nil
+	case "w":
+		// Toggle diff line wrapping (long lines wrap to multiple visual rows
+		// instead of being truncated with …).
+		if m.detailRightTab == 0 {
+			m.diffWrap = !m.diffWrap
+			m.diffScroll = 0
+		}
+		return m, nil
+	case "<", ",":
+		// Shrink the left (file list) panel.
+		m.leftPanelPct = clampLeftPanelPct(m.currentLeftPanelPct() - 5)
+		return m, nil
+	case ">", ".":
+		// Grow the left (file list) panel.
+		m.leftPanelPct = clampLeftPanelPct(m.currentLeftPanelPct() + 5)
 		return m, nil
 	case "D":
 		// Toggle draft status
@@ -1015,7 +1047,17 @@ func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				if m.diffCursor > 0 {
 					m.diffCursor--
 				}
+			} else if m.detailData != nil && len(m.detailData.Checks) > 0 {
+				if m.checkCursor > 0 {
+					m.checkCursor--
+				}
+				m.checkNoURL = false
+				m.checkUnsafeURL = false
 			} else {
+				max := m.infoMaxScroll()
+				if m.infoScroll > max {
+					m.infoScroll = max
+				}
 				if m.infoScroll > 0 {
 					m.infoScroll--
 				}
@@ -1030,21 +1072,15 @@ func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				if m.diffCursor < maxLine {
 					m.diffCursor++
 				}
-			} else {
-				m.infoScroll++
-			}
-			return m, nil
-		case "J", "shift+down":
-			if m.detailRightTab == 1 && m.detailData != nil && len(m.detailData.Checks) > 0 {
+			} else if m.detailData != nil && len(m.detailData.Checks) > 0 {
 				if m.checkCursor < len(m.detailData.Checks)-1 {
 					m.checkCursor++
 				}
-			}
-			return m, nil
-		case "K", "shift+up":
-			if m.detailRightTab == 1 && m.detailData != nil && len(m.detailData.Checks) > 0 {
-				if m.checkCursor > 0 {
-					m.checkCursor--
+				m.checkNoURL = false
+				m.checkUnsafeURL = false
+			} else {
+				if m.infoScroll < m.infoMaxScroll() {
+					m.infoScroll++
 				}
 			}
 			return m, nil
@@ -1456,7 +1492,7 @@ func (m Model) currentPageSize() int {
 	if m.err != nil {
 		chromeLines++
 	}
-	available := innerHeight - chromeLines - linesColumnHeader - 2 // 2 = status bar + page info
+	available := innerHeight - chromeLines - linesColumnHeader - 3 // 3 = shortcuts + separator + info row
 	if available < minPageSize {
 		available = minPageSize
 	}
@@ -1615,8 +1651,8 @@ func (m Model) View() string {
 	for _, s := range chrome {
 		chromeHeight += lipgloss.Height(s)
 	}
-	// Reserve: 1 for status bar, 1 for page info line
-	reservedLines := 2
+	// Reserve: shortcuts row + separator + info row = 3 lines
+	reservedLines := 3
 	availableListHeight := innerHeight - chromeHeight - reservedLines
 	if availableListHeight < minPageSize {
 		availableListHeight = minPageSize
@@ -1648,19 +1684,27 @@ func (m Model) View() string {
 		repoCounts[pr.Repository]++
 	}
 
-	prList := renderPRList(items, m.cursor, innerWidth, m.activeSection, m.unseenPRs, repoCounts)
+	prList := renderPRList(items, m.cursor, innerWidth, m.unseenPRs, repoCounts)
 	prListView := lipgloss.NewStyle().Height(availableListHeight).MaxHeight(availableListHeight).Render(prList)
 	sections = append(sections, prListView)
 
-	// Page info at the bottom
-	if pages > 1 {
-		pageInfo := ageStyle.Render(fmt.Sprintf("  Page %d/%d (%d items)", m.page+1, pages, total))
-		sections = append(sections, pageInfo)
-	}
-
-	// Status bar
-	statusBar := renderStatusBar(m.lastRefresh, m.loading, m.firstLoad, m.refreshInterval, m.hourglassFrame, innerWidth)
-	sections = append(sections, statusBar)
+	// Footer: shortcuts row, separator, info row
+	sectionTotal := len(m.prs[m.activeSection])
+	sections = append(sections, renderShortcutsBar(innerWidth))
+	sections = append(sections, renderFooterSeparator(innerWidth))
+	sections = append(sections, renderInfoBar(
+		"glance",
+		sectionShortLabel(m.activeSection),
+		sectionTotal,
+		m.page,
+		pages,
+		m.lastRefresh,
+		m.loading,
+		m.firstLoad,
+		m.refreshInterval,
+		m.hourglassFrame,
+		innerWidth,
+	))
 
 	content := strings.Join(sections, "\n")
 
@@ -1678,7 +1722,17 @@ func renderHeader(orgs []string, width int) string {
 
 	orgInfo := ""
 	if len(orgs) > 0 {
-		orgInfo = ageStyle.Render(fmt.Sprintf("orgs: %d", len(orgs)))
+		titleWidth := lipgloss.Width(title)
+		// Available width for the org list — leave a 2-col gutter on the right.
+		avail := width - titleWidth - 2 - len("orgs: ")
+		if avail < 4 {
+			avail = 4
+		}
+		list := strings.Join(orgs, ", ")
+		if lipgloss.Width(list) > avail {
+			list = truncate(list, avail)
+		}
+		orgInfo = ageStyle.Render("orgs: " + list)
 	}
 
 	titleWidth := lipgloss.Width(title)
@@ -1918,17 +1972,42 @@ func (m Model) countdownTick() tea.Cmd {
 	})
 }
 
-func openBrowser(url string) {
+// openBrowser opens rawURL in the user's default browser. Returns false if the
+// URL was refused by isSafeBrowserURL (caller may want to surface a banner).
+func openBrowser(rawURL string) bool {
+	if !isSafeBrowserURL(rawURL) {
+		return false
+	}
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
-		cmd = exec.Command("open", url)
+		cmd = exec.Command("open", rawURL)
 	case "linux":
-		cmd = exec.Command("xdg-open", url)
+		cmd = exec.Command("xdg-open", rawURL)
 	case "windows":
-		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", rawURL)
 	default:
-		return
+		return false
 	}
 	_ = cmd.Start()
+	return true
+}
+
+// isSafeBrowserURL allows only http(s) URLs. Status check URLs come from CI
+// integrations and are not trusted: a leading "-" would let open/xdg-open
+// parse the URL as a flag, and schemes like file:// / javascript: / smb:
+// can be turned into local file disclosure or credential leaks.
+func isSafeBrowserURL(rawURL string) bool {
+	if rawURL == "" || strings.HasPrefix(rawURL, "-") {
+		return false
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	switch u.Scheme {
+	case "http", "https":
+		return u.Host != ""
+	}
+	return false
 }

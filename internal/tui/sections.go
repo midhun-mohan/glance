@@ -21,17 +21,29 @@ var sectionLabels = map[github.Section]string{
 	github.SectionBrowse:          "[5] Browse",
 }
 
+// sectionShortLabel returns the section name without the leading shortcut prefix,
+// for use in the footer where the shortcut number would be redundant.
+var sectionShortLabels = map[github.Section]string{
+	github.SectionCreated:         "Created by me",
+	github.SectionReviewRequested: "Review requested",
+	github.SectionAssigned:        "Assigned",
+	github.SectionMentions:        "Mentions",
+	github.SectionBrowse:          "Browse",
+}
+
+func sectionShortLabel(s github.Section) string {
+	if v, ok := sectionShortLabels[s]; ok {
+		return v
+	}
+	return ""
+}
+
 func renderTabs(active github.Section, counts, unseenCounts map[github.Section]int, width int) string {
+	_ = counts // total counts are surfaced in the footer, not the tab labels
 	var tabParts []string
 	for _, s := range sectionOrder {
-		label := sectionLabels[s]
-		count := counts[s]
-		unseen := unseenCounts[s]
-		tabText := label
-		if count > 0 {
-			tabText = label + " (" + itoa(count) + ")"
-		}
-		if unseen > 0 {
+		tabText := sectionLabels[s]
+		if unseen := unseenCounts[s]; unseen > 0 {
 			tabText += " " + unseenDotStyle.Render(itoa(unseen) + " new")
 		}
 		if s == active {
