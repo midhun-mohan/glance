@@ -97,6 +97,9 @@ type Model struct {
 	hourglassFrame int
 	err            error
 
+	// Self-upgrade notice (populated once at startup from GitHub releases)
+	latestVersion string
+
 	// Browse PR dialog
 	browseMode     bool
 	browseInput    string
@@ -157,6 +160,10 @@ type commentResultMsg struct {
 type tickMsg time.Time
 type countdownTickMsg time.Time
 
+type latestReleaseMsg struct {
+	tag string
+}
+
 var hourglassFrames = []string{"⏳", "⌛"}
 
 func NewModel(cfg config.Config, client *github.Client, startSection github.Section, filterExpr string, username string) Model {
@@ -206,6 +213,7 @@ func (m Model) Init() tea.Cmd {
 		m.fetchOrgs(),
 		m.autoRefreshTick(),
 		m.countdownTick(),
+		checkLatestRelease(),
 	)
 }
 
@@ -322,6 +330,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case countdownTickMsg:
 		m.hourglassFrame = (m.hourglassFrame + 1) % len(hourglassFrames)
 		return m, m.countdownTick()
+
+	case latestReleaseMsg:
+		if isNewerVersion(config.Version, msg.tag) {
+			m.latestVersion = msg.tag
+		}
+		return m, nil
 
 	case prActionResultMsg:
 		m.confirmLoading = false
@@ -1703,6 +1717,7 @@ func (m Model) View() string {
 		m.firstLoad,
 		m.refreshInterval,
 		m.hourglassFrame,
+		m.latestVersion,
 		innerWidth,
 	))
 
@@ -1970,6 +1985,66 @@ func (m Model) countdownTick() tea.Cmd {
 	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
 		return countdownTickMsg(t)
 	})
+}
+
+// checkLatestRelease asks GitHub for the latest published release tag once at
+// startup. Any error is silent — the footer hint only appears on success.
+func checkLatestRelease() tea.Cmd {
+	return func() tea.Msg {
+		tag, err := github.LatestReleaseTag()
+		if err != nil {
+			return latestReleaseMsg{tag: ""}
+		}
+		return latestReleaseMsg{tag: tag}
+	}
+}
+
+// isNewerVersion returns true when remote is strictly newer than local. Both
+// may be prefixed with "v" and may carry a pre-release suffix ("-rc1"), which
+// is ignored for the comparison. Returns false if local is "dev" or either
+// version is unparseable, so unknown states never surface as a false alarm.
+func isNewerVersion(local, remote string) bool {
+	if remote == "" {
+		return false
+	}
+	if local == "" || local == "dev" {
+		return false
+	}
+	lp, ok := parseSemver(local)
+	if !ok {
+		return false
+	}
+	rp, ok := parseSemver(remote)
+	if !ok {
+		return false
+	}
+	for i := 0; i < 3; i++ {
+		if rp[i] != lp[i] {
+			return rp[i] > lp[i]
+		}
+	}
+	return false
+}
+
+func parseSemver(v string) ([3]int, bool) {
+	var out [3]int
+	s := strings.TrimPrefix(strings.TrimSpace(v), "v")
+	// Drop pre-release / build metadata
+	if i := strings.IndexAny(s, "-+"); i >= 0 {
+		s = s[:i]
+	}
+	parts := strings.SplitN(s, ".", 4)
+	if len(parts) < 1 {
+		return out, false
+	}
+	for i := 0; i < 3 && i < len(parts); i++ {
+		n, err := strconv.Atoi(parts[i])
+		if err != nil {
+			return out, false
+		}
+		out[i] = n
+	}
+	return out, true
 }
 
 // openBrowser opens rawURL in the user's default browser. Returns false if the

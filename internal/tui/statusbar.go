@@ -47,12 +47,19 @@ func renderInfoBar(
 	firstLoad bool,
 	refreshInterval time.Duration,
 	hourglassFrame int,
+	updateAvailable string,
 	width int,
 ) string {
 	sep := ageStyle.Render(" | ")
 
 	var segs []string
 	segs = append(segs, helpKeyStyle.Render(appName))
+
+	if updateAvailable != "" {
+		notice := lipgloss.NewStyle().Foreground(warningColor).Bold(true).
+			Render("↑ " + updateAvailable + " available")
+		segs = append(segs, notice)
+	}
 
 	if sectionLabel != "" {
 		segs = append(segs, ageStyle.Render(fmt.Sprintf("%s: %d", sectionLabel, sectionCount)))
