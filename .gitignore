@@ -11,3 +11,4 @@ specs/
 bugs/**
 feature/**
 .claude/**
+security/**
