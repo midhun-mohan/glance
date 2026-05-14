@@ -58,7 +58,7 @@ func titleColWidth(totalWidth int) int {
 	return w
 }
 
-func renderPRList(items []displayItem, cursor int, width int, unseenPRs map[string]bool, repoCounts map[string]int) string {
+func renderPRList(items []displayItem, cursor int, width int, unseenPRs map[string]bool, repoCounts map[string]int, favorites map[string]bool) string {
 	if len(items) == 0 {
 		return emptyStyle.Render("No pull requests in this section")
 	}
@@ -79,7 +79,7 @@ func renderPRList(items []displayItem, cursor int, width int, unseenPRs map[stri
 				if groupIndex > 0 {
 					rows = append(rows, "")
 				}
-				header := fmt.Sprintf(" ▾ %s (%d)", item.pr.Repository, repoCounts[item.pr.Repository])
+				header := fmt.Sprintf(" ▾ %s%s (%d)", favoriteMarker(favorites, item.pr.Repository), item.pr.Repository, repoCounts[item.pr.Repository])
 				rows = append(rows, repoHeaderStyle.Render(header))
 				lastRepo = item.pr.Repository
 				groupIndex++
@@ -104,7 +104,7 @@ func renderPRList(items []displayItem, cursor int, width int, unseenPRs map[stri
 			if groupIndex > 0 {
 				rows = append(rows, "")
 			}
-			header := fmt.Sprintf(" ▸ %s (%d)", item.repoName, item.count)
+			header := fmt.Sprintf(" ▸ %s%s (%d)", favoriteMarker(favorites, item.repoName), item.repoName, item.count)
 			if i == cursor {
 				rows = append(rows, padAndHighlight(header, width, collapsedSelectedStyle))
 			} else {
@@ -116,6 +116,13 @@ func renderPRList(items []displayItem, cursor int, width int, unseenPRs map[stri
 	}
 
 	return strings.Join(rows, "\n")
+}
+
+func favoriteMarker(favorites map[string]bool, repo string) string {
+	if favorites[repo] {
+		return "★ "
+	}
+	return ""
 }
 
 // padAndHighlight strips inner ANSI codes from the row so the style's background
@@ -325,6 +332,20 @@ func getChecksIcon(state string) string {
 
 func sortByRepo(prs []github.PullRequest) {
 	sort.SliceStable(prs, func(i, j int) bool {
+		return prs[i].Repository < prs[j].Repository
+	})
+}
+
+// sortByRepoFavorites groups PRs by repository, placing favorites first
+// (alphabetical within bucket), then non-favorites (alphabetical within bucket).
+// Stable so PRs from the same repo keep their relative order.
+func sortByRepoFavorites(prs []github.PullRequest, favorites map[string]bool) {
+	sort.SliceStable(prs, func(i, j int) bool {
+		fi := favorites[prs[i].Repository]
+		fj := favorites[prs[j].Repository]
+		if fi != fj {
+			return fi
+		}
 		return prs[i].Repository < prs[j].Repository
 	})
 }

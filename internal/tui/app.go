@@ -100,6 +100,10 @@ type Model struct {
 	// Self-upgrade notice (populated once at startup from GitHub releases)
 	latestVersion string
 
+	// Favorite repos (always pinned to top); mirrored to cfg.Favorites on toggle.
+	favorites     map[string]bool
+	showFavorites bool
+
 	// Browse PR dialog
 	browseMode     bool
 	browseInput    string
@@ -179,6 +183,14 @@ func NewModel(cfg config.Config, client *github.Client, startSection github.Sect
 		username,
 	)
 
+	favorites := make(map[string]bool, len(cfg.Favorites))
+	for _, repo := range cfg.Favorites {
+		repo = strings.TrimSpace(repo)
+		if repo != "" {
+			favorites[repo] = true
+		}
+	}
+
 	m := Model{
 		cfg:             cfg,
 		client:          client,
@@ -189,6 +201,7 @@ func NewModel(cfg config.Config, client *github.Client, startSection github.Sect
 		collapsedRepos:    make(map[string]bool),
 		expandedRepoLimit: make(map[string]int),
 		unseenPRs:        make(map[string]bool),
+		favorites:        favorites,
 		prs: github.PRsBySection{
 			github.SectionCreated:         {},
 			github.SectionReviewRequested: {},
@@ -373,6 +386,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Help overlay intercepts all other keys
 	if m.showHelp {
 		m.showHelp = false
+		return m, nil
+	}
+
+	// Favorites overlay intercepts all other keys
+	if m.showFavorites {
+		m.showFavorites = false
 		return m, nil
 	}
 
@@ -657,6 +676,20 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.browseMode = true
 		m.browseInput = ""
 		m.browseError = ""
+		return m, nil
+	case "f":
+		ps := m.currentPageSize()
+		items, _ := m.pagedDisplayItems(ps)
+		if m.cursor >= 0 && m.cursor < len(items) {
+			repo := itemRepo(items[m.cursor])
+			if repo != "" {
+				m.toggleFavorite(repo)
+				m.moveCursorToRepo(repo)
+			}
+		}
+		return m, nil
+	case "F":
+		m.showFavorites = true
 		return m, nil
 	case "M":
 		if m.activeSection == github.SectionCreated {
@@ -1305,8 +1338,8 @@ func (m Model) filteredPRs() []github.PullRequest {
 		prs = fuzzyFilter(m.searchQuery, prs)
 	}
 
-	// Sort by repository for grouping
-	sortByRepo(prs)
+	// Sort by repository for grouping (favorites pinned to top)
+	sortByRepoFavorites(prs, m.favorites)
 
 	return prs
 }
@@ -1408,6 +1441,31 @@ func (m *Model) jumpToPrevRepoGroup() {
 
 	m.page = target / ps
 	m.cursor = target % ps
+}
+
+// toggleFavorite flips the favorite bit for repo, syncs cfg.Favorites
+// (sorted, deduped) and persists the config. On save failure the result
+// banner shows an error; the in-memory toggle is preserved either way.
+func (m *Model) toggleFavorite(repo string) {
+	if m.favorites == nil {
+		m.favorites = map[string]bool{}
+	}
+	if m.favorites[repo] {
+		delete(m.favorites, repo)
+	} else {
+		m.favorites[repo] = true
+	}
+
+	list := make([]string, 0, len(m.favorites))
+	for r := range m.favorites {
+		list = append(list, r)
+	}
+	sort.Strings(list)
+	m.cfg.Favorites = list
+
+	if err := config.Save(m.cfg); err != nil {
+		m.confirmResult = fmt.Sprintf("✗ Saved favorite in-memory but failed to persist: %v", err)
+	}
 }
 
 func itemRepo(item displayItem) string {
@@ -1580,6 +1638,11 @@ func (m Model) View() string {
 		return renderHelp(m.width, m.height)
 	}
 
+	// Favorites overlay
+	if m.showFavorites {
+		return m.renderFavoritesDialog()
+	}
+
 	// Confirmation dialog overlay
 	if m.confirmMode != "" {
 		return m.renderConfirmDialog()
@@ -1698,7 +1761,7 @@ func (m Model) View() string {
 		repoCounts[pr.Repository]++
 	}
 
-	prList := renderPRList(items, m.cursor, innerWidth, m.unseenPRs, repoCounts)
+	prList := renderPRList(items, m.cursor, innerWidth, m.unseenPRs, repoCounts, m.favorites)
 	prListView := lipgloss.NewStyle().Height(availableListHeight).MaxHeight(availableListHeight).Render(prList)
 	sections = append(sections, prListView)
 
@@ -1758,6 +1821,33 @@ func renderHeader(orgs []string, width int) string {
 	}
 
 	return title + strings.Repeat(" ", gap) + orgInfo
+}
+
+func (m Model) renderFavoritesDialog() string {
+	title := lipgloss.NewStyle().Bold(true).Foreground(primaryColor).Render("★ Favorite Repos")
+
+	var lines []string
+	lines = append(lines, title, "")
+
+	if len(m.favorites) == 0 {
+		lines = append(lines, emptyStyle.Render("No favorites yet — press f on a repo to pin it."))
+	} else {
+		repos := make([]string, 0, len(m.favorites))
+		for r := range m.favorites {
+			repos = append(repos, r)
+		}
+		sort.Strings(repos)
+		for _, r := range repos {
+			lines = append(lines, "  "+helpKeyStyle.Render("★")+" "+helpDescStyle.Render(r))
+		}
+	}
+
+	lines = append(lines, "")
+	lines = append(lines, helpDescStyle.Render("Press any key to close"))
+
+	content := strings.Join(lines, "\n")
+	overlay := helpOverlayStyle.Render(content)
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, overlay)
 }
 
 func (m Model) renderPresetPicker() string {

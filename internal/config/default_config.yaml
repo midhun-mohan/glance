@@ -46,3 +46,7 @@ ui:
   compact: false
   # Show user avatars (requires terminal image support)
   show_avatars: false
+
+# Favorite repositories (always pinned to the top of every section).
+# Toggle with the `f` key in the TUI; this list is auto-saved on change.
+favorites: []

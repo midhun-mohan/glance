@@ -23,6 +23,7 @@ type Config struct {
 	Notifications NotificationConfig `yaml:"notifications"`
 	Presets       map[string]string  `yaml:"presets"`
 	UI            UIConfig           `yaml:"ui"`
+	Favorites     []string           `yaml:"favorites"`
 }
 
 type OrgConfig struct {
@@ -89,6 +90,7 @@ func DefaultConfig() Config {
 			Compact:     false,
 			ShowAvatars: false,
 		},
+		Favorites: []string{},
 	}
 }
 
