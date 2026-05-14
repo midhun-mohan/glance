@@ -336,6 +336,82 @@ func (c *Client) searchPRs(searchQuery string) ([]PullRequest, error) {
 	return prs, nil
 }
 
+// SearchRepositories runs a GitHub repository search scoped to the given orgs
+// (or unscoped if orgs is empty). Returns up to 15 ranked matches. Used for
+// the Browse-dialog repo picker; called per-keystroke and is therefore kept
+// small.
+func (c *Client) SearchRepositories(query string, orgs []string) ([]Repository, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, nil
+	}
+	// If the user typed "owner/repo-prefix", split it: GitHub tokenizes the
+	// query on '/' and would then require BOTH halves to appear in the repo
+	// name (via in:name), which never matches because the org name isn't in
+	// the repo name. Use the prefix after the slash as the search term and
+	// scope by org explicitly.
+	searchOrgs := orgs
+	if idx := strings.Index(query, "/"); idx >= 0 {
+		owner := strings.TrimSpace(query[:idx])
+		namePart := strings.TrimSpace(query[idx+1:])
+		if owner != "" {
+			searchOrgs = []string{owner}
+		}
+		query = namePart
+	}
+	if query == "" {
+		return nil, nil
+	}
+	full := query + " in:name"
+	if len(searchOrgs) > 0 {
+		parts := make([]string, len(searchOrgs))
+		for i, org := range searchOrgs {
+			parts[i] = "org:" + org
+		}
+		full += " " + strings.Join(parts, " ")
+	}
+
+	gql := `query($q: String!) {
+		search(query: $q, type: REPOSITORY, first: 15) {
+			nodes {
+				... on Repository {
+					nameWithOwner
+					description
+				}
+			}
+		}
+	}`
+
+	var result struct {
+		Search struct {
+			Nodes []struct {
+				NameWithOwner string `json:"nameWithOwner"`
+				Description   string `json:"description"`
+			} `json:"nodes"`
+		} `json:"search"`
+	}
+	if err := c.graphQL(gql, map[string]interface{}{"q": full}, &result); err != nil {
+		return nil, err
+	}
+	repos := make([]Repository, 0, len(result.Search.Nodes))
+	for _, n := range result.Search.Nodes {
+		if n.NameWithOwner == "" {
+			continue
+		}
+		repos = append(repos, Repository{
+			NameWithOwner: sanitizeForTerminal(n.NameWithOwner),
+			Description:   sanitizeForTerminal(n.Description),
+		})
+	}
+	return repos, nil
+}
+
+// FetchOpenPRsInRepo returns all open PRs for a single repository, in the
+// same PullRequest shape used by the dashboard sections.
+func (c *Client) FetchOpenPRsInRepo(owner, repo string) ([]PullRequest, error) {
+	return c.searchPRs(fmt.Sprintf("repo:%s/%s is:pr is:open", owner, repo))
+}
+
 // SplitOwnerRepo splits "owner/repo" into its two parts.
 func SplitOwnerRepo(nameWithOwner string) (string, string) {
 	parts := strings.SplitN(nameWithOwner, "/", 2)

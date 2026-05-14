@@ -157,6 +157,13 @@ func PRFromDetail(d *PRDetail) PullRequest {
 
 type PRsBySection map[Section][]PullRequest
 
+// Repository is a minimal repo descriptor returned by SearchRepositories,
+// used by the TUI's repo-picker dialog.
+type Repository struct {
+	NameWithOwner string
+	Description   string
+}
+
 // --- Rich detail types (fetched on-demand for a single PR) ---
 
 type CheckStatus string

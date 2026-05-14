@@ -110,6 +110,15 @@ type Model struct {
 	browseError    string
 	browsePending  bool // a browse-initiated detail fetch is in progress
 
+	// Repo-picker state inside the Browse dialog. Suggestions populate as the
+	// user types a repo name (no `#`), debounced via a monotonic sequence
+	// number so stale responses are dropped.
+	browseRepoSuggestions []github.Repository
+	browseRepoCursor      int
+	browseRepoLoading     bool
+	browseRepoError       string
+	browseSearchSeq       int
+
 	// Confirmation dialog (approve/reject/merge)
 	confirmMode    string          // "", "approve", "reject", "merge"
 	confirmInput   string          // message being typed
@@ -166,6 +175,17 @@ type countdownTickMsg time.Time
 
 type latestReleaseMsg struct {
 	tag string
+}
+
+type repoSearchResultMsg struct {
+	seq   int
+	repos []github.Repository
+	err   error
+}
+
+type repoPRsLoadedMsg struct {
+	prs []github.PullRequest
+	err error
 }
 
 var hourglassFrames = []string{"⏳", "⌛"}
@@ -347,6 +367,41 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case latestReleaseMsg:
 		if isNewerVersion(config.Version, msg.tag) {
 			m.latestVersion = msg.tag
+		}
+		return m, nil
+
+	case repoSearchResultMsg:
+		// Drop stale responses: only the most recent query matches the seq.
+		if msg.seq != m.browseSearchSeq {
+			return m, nil
+		}
+		m.browseRepoLoading = false
+		if msg.err != nil {
+			m.browseRepoError = msg.err.Error()
+			m.browseRepoSuggestions = nil
+			m.browseRepoCursor = 0
+			return m, nil
+		}
+		m.browseRepoError = ""
+		m.browseRepoSuggestions = msg.repos
+		m.browseRepoCursor = 0
+		return m, nil
+
+	case repoPRsLoadedMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.confirmResult = "✗ " + msg.err.Error()
+			return m, nil
+		}
+		existing := make(map[string]bool, len(m.prs[github.SectionBrowse]))
+		for _, pr := range m.prs[github.SectionBrowse] {
+			existing[pr.URL] = true
+		}
+		for _, pr := range msg.prs {
+			if !existing[pr.URL] {
+				m.prs[github.SectionBrowse] = append(m.prs[github.SectionBrowse], pr)
+				existing[pr.URL] = true
+			}
 		}
 		return m, nil
 
@@ -755,24 +810,45 @@ func (m Model) handleBrowseKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.Paste {
 		m.browseInput += string(msg.Runes)
 		m.browseError = ""
-		return m, nil
+		cmd := (&m).startRepoSearchIfNeeded()
+		return m, cmd
 	}
 
 	switch msg.String() {
 	case "esc":
-		m.browseMode = false
-		m.browseInput = ""
-		m.browseError = ""
+		m.resetBrowseDialog()
+		return m, nil
+	case "up":
+		if len(m.browseRepoSuggestions) > 0 && m.browseRepoCursor > 0 {
+			m.browseRepoCursor--
+		}
+		return m, nil
+	case "down":
+		if len(m.browseRepoSuggestions) > 0 && m.browseRepoCursor < len(m.browseRepoSuggestions)-1 {
+			m.browseRepoCursor++
+		}
 		return m, nil
 	case "enter":
+		// If we have repo suggestions, Enter picks the highlighted one.
+		if len(m.browseRepoSuggestions) > 0 && m.browseRepoCursor >= 0 && m.browseRepoCursor < len(m.browseRepoSuggestions) {
+			sel := m.browseRepoSuggestions[m.browseRepoCursor]
+			owner, repo := github.SplitOwnerRepo(sel.NameWithOwner)
+			if owner != "" && repo != "" {
+				m.resetBrowseDialog()
+				m.activeSection = github.SectionBrowse
+				m.cursor = 0
+				m.page = 0
+				m.loading = true
+				return m, m.fetchRepoOpenPRs(owner, repo)
+			}
+		}
+		// Otherwise fall back to the PR-ref parser (owner/repo#N or URL).
 		owner, repo, number, err := parsePRReference(m.browseInput)
 		if err != nil {
 			m.browseError = err.Error()
 			return m, nil
 		}
-		m.browseMode = false
-		m.browseInput = ""
-		m.browseError = ""
+		m.resetBrowseDialog()
 		m.browsePending = true
 		m.showDetail = true
 		m.detailLoading = true
@@ -799,7 +875,8 @@ func (m Model) handleBrowseKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.browseInput = m.browseInput[:len(m.browseInput)-1]
 		}
 		m.browseError = ""
-		return m, nil
+		cmd := (&m).startRepoSearchIfNeeded()
+		return m, cmd
 	case "left":
 		// no-op: cursor movement not supported, but don't insert the char
 		return m, nil
@@ -809,9 +886,55 @@ func (m Model) handleBrowseKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(msg.String()) == 1 {
 			m.browseInput += msg.String()
 			m.browseError = ""
+			cmd := (&m).startRepoSearchIfNeeded()
+			return m, cmd
 		}
 		return m, nil
 	}
+}
+
+// resetBrowseDialog clears every piece of dialog/picker state so the dialog
+// reopens fresh next time.
+func (m *Model) resetBrowseDialog() {
+	m.browseMode = false
+	m.browseInput = ""
+	m.browseError = ""
+	m.browseRepoSuggestions = nil
+	m.browseRepoCursor = 0
+	m.browseRepoLoading = false
+	m.browseRepoError = ""
+}
+
+// startRepoSearchIfNeeded decides whether the current input looks like a repo
+// search (vs a PR reference) and, if so, kicks off a debounced GitHub search.
+// Returns nil when the input is a PR ref, too short, or otherwise not searchable.
+func (m *Model) startRepoSearchIfNeeded() tea.Cmd {
+	input := strings.TrimSpace(m.browseInput)
+	// Looks like a PR ref → no repo suggestions.
+	if strings.Contains(input, "#") || strings.Contains(input, "github.com/") {
+		m.browseRepoSuggestions = nil
+		m.browseRepoCursor = 0
+		m.browseRepoLoading = false
+		m.browseRepoError = ""
+		return nil
+	}
+	if len(input) < 2 {
+		m.browseRepoSuggestions = nil
+		m.browseRepoCursor = 0
+		m.browseRepoLoading = false
+		m.browseRepoError = ""
+		return nil
+	}
+	m.browseSearchSeq++
+	seq := m.browseSearchSeq
+	m.browseRepoLoading = true
+	m.browseRepoError = ""
+	client := m.client
+	orgs := m.orgs
+	return tea.Tick(300*time.Millisecond, func(_ time.Time) tea.Msg {
+		repos, err := client.SearchRepositories(input, orgs)
+		return repoSearchResultMsg{seq: seq, repos: repos, err: err}
+	})
 }
 
 // parsePRReference parses a PR reference in the form "owner/repo#123" or a
@@ -1877,24 +2000,71 @@ func (m Model) renderPresetPicker() string {
 func (m Model) renderBrowseDialog() string {
 	var lines []string
 
+	boxW := m.width * 2 / 3
+	if boxW < 54 {
+		boxW = 54
+	}
+	if boxW > 100 {
+		boxW = 100
+	}
+	if boxW > m.width-4 {
+		boxW = m.width - 4
+	}
+	inputW := boxW - 10
+	if inputW < 30 {
+		inputW = 30
+	}
+
 	title := lipgloss.NewStyle().Bold(true).Foreground(secondaryColor).Render("Browse PR")
 	lines = append(lines, title)
 	lines = append(lines, "")
-	lines = append(lines, helpDescStyle.Render("Enter owner/repo#number or GitHub URL:"))
-	inputBox := confirmInputStyle.Width(40).Render(m.browseInput + "█")
+	lines = append(lines, helpDescStyle.Render("Type owner/repo#N or a URL — or search a repo by name:"))
+	inputBox := confirmInputStyle.Width(inputW).Render(m.browseInput + "█")
 	lines = append(lines, inputBox)
 
 	if m.browseError != "" {
 		lines = append(lines, lipgloss.NewStyle().Foreground(dangerColor).Render(m.browseError))
 	}
 
+	// Repo suggestions area (only when the input is repo-name-shaped).
+	if m.browseRepoLoading || m.browseRepoError != "" || len(m.browseRepoSuggestions) > 0 {
+		lines = append(lines, "")
+		switch {
+		case m.browseRepoError != "":
+			lines = append(lines, lipgloss.NewStyle().Foreground(dangerColor).Render("Search error: "+m.browseRepoError))
+		case m.browseRepoLoading && len(m.browseRepoSuggestions) == 0:
+			lines = append(lines, spinnerStyle.Render("⟳ Searching repos..."))
+		case len(m.browseRepoSuggestions) == 0:
+			lines = append(lines, emptyStyle.Render("No matching repos"))
+		default:
+			for i, r := range m.browseRepoSuggestions {
+				name := r.NameWithOwner
+				desc := r.Description
+				row := helpKeyStyle.Render(name)
+				if desc != "" {
+					row += " " + helpDescStyle.Render(truncate(desc, 36))
+				}
+				if i == m.browseRepoCursor {
+					lines = append(lines, selectedPRStyle.Render("▸ "+row))
+				} else {
+					lines = append(lines, "  "+row)
+				}
+			}
+		}
+	}
+
 	lines = append(lines, "")
 	enterKey := helpKeyStyle.Render("Enter")
 	escKey := helpKeyStyle.Render("Esc")
-	lines = append(lines, enterKey+" open  •  "+escKey+" cancel")
+	if len(m.browseRepoSuggestions) > 0 {
+		upDown := helpKeyStyle.Render("↑↓")
+		lines = append(lines, upDown+" pick  •  "+enterKey+" load repo  •  "+escKey+" cancel")
+	} else {
+		lines = append(lines, enterKey+" open  •  "+escKey+" cancel")
+	}
 
 	content := strings.Join(lines, "\n")
-	overlay := helpOverlayStyle.Width(46).Render(content)
+	overlay := helpOverlayStyle.Width(boxW).Render(content)
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, overlay)
 }
 
@@ -2062,6 +2232,14 @@ func (m Model) fetchPRs() tea.Cmd {
 			return errMsg{err: err}
 		}
 		return prsLoadedMsg{prs: prs}
+	}
+}
+
+func (m Model) fetchRepoOpenPRs(owner, repo string) tea.Cmd {
+	client := m.client
+	return func() tea.Msg {
+		prs, err := client.FetchOpenPRsInRepo(owner, repo)
+		return repoPRsLoadedMsg{prs: prs, err: err}
 	}
 }
 

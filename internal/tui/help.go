@@ -39,7 +39,7 @@ var helpEntries = []helpEntry{
 	{"< / >", "Resize split (file list ⇄ diff)"},
 	{"c", "Collapse/expand group"},
 	{"C", "Collapse/expand all groups"},
-	{"B", "Browse any PR"},
+	{"B", "Browse PR / search repos"},
 	{"f", "Toggle repo favorite"},
 	{"F", "Show favorite repos"},
 	{"/", "Search / filter"},
