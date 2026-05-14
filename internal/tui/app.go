@@ -1801,7 +1801,9 @@ func (m Model) View() string {
 
 	// Header
 	header := renderHeader(m.orgs, innerWidth)
-	chrome = append(chrome, header)
+	if header != "" {
+		chrome = append(chrome, header)
+	}
 
 	// Tabs
 	counts := make(map[github.Section]int)
@@ -1919,31 +1921,28 @@ func (m Model) View() string {
 }
 
 func renderHeader(orgs []string, width int) string {
-	title := headerStyle.Render("glance")
-
-	orgInfo := ""
-	if len(orgs) > 0 {
-		titleWidth := lipgloss.Width(title)
-		// Available width for the org list — leave a 2-col gutter on the right.
-		avail := width - titleWidth - 2 - len("orgs: ")
-		if avail < 4 {
-			avail = 4
-		}
-		list := strings.Join(orgs, ", ")
-		if lipgloss.Width(list) > avail {
-			list = truncate(list, avail)
-		}
-		orgInfo = ageStyle.Render("orgs: " + list)
+	if len(orgs) == 0 {
+		return ""
 	}
 
-	titleWidth := lipgloss.Width(title)
+	// Available width for the org list — leave a 2-col gutter on the right.
+	avail := width - 2 - len("orgs: ")
+	if avail < 4 {
+		avail = 4
+	}
+	list := strings.Join(orgs, ", ")
+	if lipgloss.Width(list) > avail {
+		list = truncate(list, avail)
+	}
+	orgInfo := ageStyle.Render("orgs: " + list)
+
 	orgWidth := lipgloss.Width(orgInfo)
-	gap := width - titleWidth - orgWidth - 2
+	gap := width - orgWidth - 2
 	if gap < 0 {
 		gap = 0
 	}
 
-	return title + strings.Repeat(" ", gap) + orgInfo
+	return strings.Repeat(" ", gap) + orgInfo
 }
 
 func (m Model) renderFavoritesDialog() string {
