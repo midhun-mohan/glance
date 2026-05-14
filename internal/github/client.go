@@ -1091,3 +1091,243 @@ func (c *Client) MarkReadyForReview(nodeID string) error {
 	var result interface{}
 	return c.graphQL(query, vars, &result)
 }
+
+// branchCommitInspectDepth is how many recent commits per branch we look at
+// to decide whether the viewer authored the branch. A small number keeps the
+// GraphQL response cheap.
+const branchCommitInspectDepth = 5
+
+// RepoInfo holds the bits about a repo needed for the create-PR flow: its
+// default branch and the most recently-active user branches.
+type RepoInfo struct {
+	DefaultBranch string
+	Branches      []Branch
+}
+
+// ListUserBranches returns the most recently-active branches in the repo,
+// keeping only those where `username` authored at least one of the last
+// `branchCommitInspectDepth` commits. The repository's default branch is
+// always excluded (you don't open a PR from default → default).
+//
+// Also returns the default branch name so callers can pre-fill the PR base.
+func (c *Client) ListUserBranches(owner, repo, username string) (RepoInfo, error) {
+	query := `query($owner: String!, $repo: String!, $depth: Int!) {
+		repository(owner: $owner, name: $repo) {
+			defaultBranchRef { name }
+			refs(refPrefix: "refs/heads/", first: 100, orderBy: {field: TAG_COMMIT_DATE, direction: DESC}) {
+				nodes {
+					name
+					target {
+						... on Commit {
+							oid
+							messageHeadline
+							messageBody
+							committedDate
+							author { name user { login } }
+							history(first: $depth) {
+								nodes {
+									author { user { login } }
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}`
+
+	var result struct {
+		Repository struct {
+			DefaultBranchRef struct {
+				Name string `json:"name"`
+			} `json:"defaultBranchRef"`
+			Refs struct {
+				Nodes []struct {
+					Name   string `json:"name"`
+					Target struct {
+						OID             string    `json:"oid"`
+						MessageHeadline string    `json:"messageHeadline"`
+						MessageBody     string    `json:"messageBody"`
+						CommittedDate   time.Time `json:"committedDate"`
+						Author          struct {
+							Name string `json:"name"`
+							User *struct {
+								Login string `json:"login"`
+							} `json:"user"`
+						} `json:"author"`
+						History struct {
+							Nodes []struct {
+								Author struct {
+									User *struct {
+										Login string `json:"login"`
+									} `json:"user"`
+								} `json:"author"`
+							} `json:"nodes"`
+						} `json:"history"`
+					} `json:"target"`
+				} `json:"nodes"`
+			} `json:"refs"`
+		} `json:"repository"`
+	}
+
+	vars := map[string]interface{}{
+		"owner": owner,
+		"repo":  repo,
+		"depth": branchCommitInspectDepth,
+	}
+	if err := c.graphQL(query, vars, &result); err != nil {
+		return RepoInfo{}, err
+	}
+
+	info := RepoInfo{
+		DefaultBranch: sanitizeForTerminal(result.Repository.DefaultBranchRef.Name),
+	}
+	for _, n := range result.Repository.Refs.Nodes {
+		if n.Name == "" || n.Name == info.DefaultBranch {
+			continue
+		}
+		mine := false
+		for _, h := range n.Target.History.Nodes {
+			if h.Author.User != nil && strings.EqualFold(h.Author.User.Login, username) {
+				mine = true
+				break
+			}
+		}
+		if !mine {
+			continue
+		}
+		author := ""
+		if n.Target.Author.User != nil {
+			author = n.Target.Author.User.Login
+		}
+		if author == "" {
+			author = n.Target.Author.Name
+		}
+		info.Branches = append(info.Branches, Branch{
+			Name:              sanitizeForTerminal(n.Name),
+			HeadSHA:           sanitizeForTerminal(n.Target.OID),
+			LastCommitSubject: sanitizeForTerminal(n.Target.MessageHeadline),
+			LastCommitBody:    sanitizeForTerminal(n.Target.MessageBody),
+			LastCommitDate:    n.Target.CommittedDate,
+			LastCommitAuthor:  sanitizeForTerminal(author),
+			AuthoredByMe:      true,
+		})
+	}
+	return info, nil
+}
+
+// CompareBranches returns the file-level diff between `base` and `head` on a
+// repository using the REST compare API. Used to preview a not-yet-created
+// PR's diff in the same shape PRDetail.Files uses.
+func (c *Client) CompareBranches(owner, repo, base, head string) ([]ChangedFile, error) {
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/compare/%s...%s",
+		urlpkg.PathEscape(owner), urlpkg.PathEscape(repo),
+		urlpkg.PathEscape(base), urlpkg.PathEscape(head))
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %w", err)
+	}
+	req.Header.Set("Authorization", "bearer "+c.token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("executing request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("GitHub API error %d: %s", resp.StatusCode, sanitizeErrorBody(respBody))
+	}
+
+	var parsed struct {
+		Files []struct {
+			Filename         string `json:"filename"`
+			Status           string `json:"status"`
+			Additions        int    `json:"additions"`
+			Deletions        int    `json:"deletions"`
+			Patch            string `json:"patch"`
+			PreviousFilename string `json:"previous_filename"`
+		} `json:"files"`
+	}
+	if err := json.Unmarshal(respBody, &parsed); err != nil {
+		return nil, fmt.Errorf("parsing response: %w", err)
+	}
+
+	files := make([]ChangedFile, 0, len(parsed.Files))
+	for _, f := range parsed.Files {
+		files = append(files, ChangedFile{
+			Filename:         sanitizeForTerminal(f.Filename),
+			Status:           sanitizeForTerminal(f.Status),
+			Additions:        f.Additions,
+			Deletions:        f.Deletions,
+			Patch:            sanitizeForTerminal(f.Patch),
+			PreviousFilename: sanitizeForTerminal(f.PreviousFilename),
+		})
+	}
+	return files, nil
+}
+
+// CreatedPR is the minimal shape returned after creating a PR via REST.
+type CreatedPR struct {
+	Number int
+	URL    string
+}
+
+// CreatePullRequest opens a new PR via the REST API. Title is required; body
+// may be empty. Returns the new PR's number and html_url on success.
+func (c *Client) CreatePullRequest(owner, repo, title, body, head, base string, draft bool) (*CreatedPR, error) {
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls",
+		urlpkg.PathEscape(owner), urlpkg.PathEscape(repo))
+
+	payload := map[string]interface{}{
+		"title": title,
+		"head":  head,
+		"base":  base,
+		"body":  body,
+		"draft": draft,
+	}
+	jsonBody, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling create-pr: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", url, bytes.NewReader(jsonBody))
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %w", err)
+	}
+	req.Header.Set("Authorization", "bearer "+c.token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("executing request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("GitHub API error %d: %s", resp.StatusCode, sanitizeErrorBody(respBody))
+	}
+
+	var parsed struct {
+		Number  int    `json:"number"`
+		HTMLURL string `json:"html_url"`
+	}
+	if err := json.Unmarshal(respBody, &parsed); err != nil {
+		return nil, fmt.Errorf("parsing response: %w", err)
+	}
+	return &CreatedPR{
+		Number: parsed.Number,
+		URL:    sanitizeForTerminal(parsed.HTMLURL),
+	}, nil
+}

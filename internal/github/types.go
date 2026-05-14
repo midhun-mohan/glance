@@ -164,6 +164,23 @@ type Repository struct {
 	Description   string
 }
 
+// Branch is a lightweight branch descriptor used by the Browse-dialog's
+// "create PR" flow. The "author" fields refer to the branch's tip commit,
+// not the branch creator (GitHub does not track branch creators).
+type Branch struct {
+	Name              string
+	HeadSHA           string
+	LastCommitSubject string
+	LastCommitBody    string
+	LastCommitDate    time.Time
+	// LastCommitAuthor is the GitHub login of the tip commit's author when
+	// the commit is linked to a user; falls back to the git author name.
+	LastCommitAuthor string
+	// AuthoredByMe is true when the viewer authored at least one of the
+	// recent commits inspected for this branch.
+	AuthoredByMe bool
+}
+
 // --- Rich detail types (fetched on-demand for a single PR) ---
 
 type CheckStatus string

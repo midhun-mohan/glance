@@ -319,13 +319,25 @@ func (m Model) renderDetailFooter(width int) string {
 		nav = "↑↓ scroll  Tab switch"
 	}
 
-	actions := "c comment  A approve  X reject  E close/reopen  D draft"
-	if m.activeSection == github.SectionCreated {
-		actions += "  M merge"
+	var actions string
+	if m.detailPreview {
+		actions = "P create PR  w wrap  <> resize"
+	} else {
+		actions = "c comment  A approve  X reject  E close/reopen  D draft"
+		if m.activeSection == github.SectionCreated {
+			actions += "  M merge"
+		}
+		actions += "  w wrap  <> resize"
 	}
-	actions += "  w wrap  <> resize"
 
-	hints := helpDescStyle.Render(nav + "  " + actions + "  i diff/info  o open  y copy  r refresh  Esc close")
+	var tail string
+	if m.detailPreview {
+		tail = "  i diff/info  Esc close"
+	} else {
+		tail = "  i diff/info  o open  y copy  r refresh  Esc close"
+	}
+
+	hints := helpDescStyle.Render(nav + "  " + actions + tail)
 
 	return sep + "\n" + hints
 }

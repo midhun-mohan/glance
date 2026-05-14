@@ -73,6 +73,11 @@ type Model struct {
 	detailLoading  bool
 	detailData     *github.PRDetail
 	detailError    error
+	// detailPreview is true when detailData represents a not-yet-created PR
+	// (a branch-compare preview). The detail view then offers "create PR"
+	// instead of approve/merge/close.
+	detailPreview       bool
+	detailPreviewBranch github.Branch
 	detailFocus    int // 0=left (files), 1=right (diff/info)
 	detailRightTab int // 0=diff, 1=info
 	fileCursor     int // selected file in left panel
@@ -118,6 +123,42 @@ type Model struct {
 	browseRepoLoading     bool
 	browseRepoError       string
 	browseSearchSeq       int
+
+	// Branch-picker step inside the Browse dialog. Activated after the user
+	// picks a repo: lists the viewer's branches in that repo so they can pick
+	// one and open a new PR.
+	browseBranchStep     bool
+	browseBranchOwner    string
+	browseBranchRepo     string
+	browseBranchDefault  string // repo default branch (PR base default)
+	browseBranches       []github.Branch
+	browseBranchCursor   int
+	browseBranchLoading  bool
+	browseBranchError    string
+	// True when the branch picker was opened directly from the list view
+	// (cursor row's repo). Used so Esc on the branch picker closes the dialog
+	// entirely, rather than dropping into an empty repo-search step.
+	browseBranchFromList bool
+	// Snapshot of the repo-search step before entering the branch picker
+	// (only set when entered from the in-dialog P key). Restored on Esc so
+	// the user returns to their prior search input and suggestions.
+	browsePrevInput       string
+	browsePrevSuggestions []github.Repository
+	browsePrevCursor      int
+
+	// Create-PR dialog (opens from the diff preview)
+	createPRMode       bool
+	createPROwner      string
+	createPRRepo       string
+	createPRHead       string
+	createPRTitle      string
+	createPRBody       string
+	createPRBase       string
+	createPRFocus      int // 0=title, 1=body, 2=base
+	createPRSubmitting bool
+	createPRError      string
+
+	username string
 
 	// Confirmation dialog (approve/reject/merge)
 	confirmMode    string          // "", "approve", "reject", "merge"
@@ -188,6 +229,31 @@ type repoPRsLoadedMsg struct {
 	err error
 }
 
+type branchesLoadedMsg struct {
+	owner         string
+	repo          string
+	defaultBranch string
+	branches      []github.Branch
+	err           error
+}
+
+type compareLoadedMsg struct {
+	owner   string
+	repo    string
+	branch  github.Branch
+	base    string
+	files   []github.ChangedFile
+	err     error
+}
+
+type createPRResultMsg struct {
+	success bool
+	message string
+	pr      *github.CreatedPR
+	owner   string
+	repo    string
+}
+
 var hourglassFrames = []string{"⏳", "⌛"}
 
 func NewModel(cfg config.Config, client *github.Client, startSection github.Section, filterExpr string, username string) Model {
@@ -218,6 +284,7 @@ func NewModel(cfg config.Config, client *github.Client, startSection github.Sect
 		presets:         filter.NewPresetManager(cfg.Presets),
 		activeSection:   startSection,
 		refreshInterval: cfg.Refresh.IntervalDuration(),
+		username:        username,
 		collapsedRepos:    make(map[string]bool),
 		expandedRepoLimit: make(map[string]int),
 		unseenPRs:        make(map[string]bool),
@@ -405,6 +472,92 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case branchesLoadedMsg:
+		// Only react if we're still in the branch step waiting for this repo.
+		if !m.browseMode || !m.browseBranchStep ||
+			m.browseBranchOwner != msg.owner || m.browseBranchRepo != msg.repo {
+			return m, nil
+		}
+		m.browseBranchLoading = false
+		if msg.err != nil {
+			m.browseBranchError = msg.err.Error()
+			m.browseBranches = nil
+			m.browseBranchCursor = 0
+			return m, nil
+		}
+		m.browseBranchError = ""
+		m.browseBranchDefault = msg.defaultBranch
+		m.browseBranches = msg.branches
+		m.browseBranchCursor = 0
+		return m, nil
+
+	case compareLoadedMsg:
+		// Build a synthetic PRDetail for the diff viewer.
+		m.detailLoading = false
+		if msg.err != nil {
+			m.detailError = msg.err
+			return m, nil
+		}
+		files := msg.files
+		var add, del int
+		for _, f := range files {
+			add += f.Additions
+			del += f.Deletions
+		}
+		title := msg.branch.LastCommitSubject
+		if title == "" {
+			title = msg.branch.Name
+		}
+		m.detailData = &github.PRDetail{
+			Title:         "[Preview] " + title,
+			Body:          msg.branch.LastCommitBody,
+			Repository:    msg.owner + "/" + msg.repo,
+			Author:        m.username,
+			State:         "OPEN",
+			BaseRefName:   msg.base,
+			HeadRefName:   msg.branch.Name,
+			HeadCommitSHA: msg.branch.HeadSHA,
+			Additions:     add,
+			Deletions:     del,
+			ChangedFiles:  len(files),
+			Files:         files,
+		}
+		sort.SliceStable(m.detailData.Files, func(i, j int) bool {
+			di := filepath.Dir(m.detailData.Files[i].Filename)
+			dj := filepath.Dir(m.detailData.Files[j].Filename)
+			if di != dj {
+				return di < dj
+			}
+			return m.detailData.Files[i].Filename < m.detailData.Files[j].Filename
+		})
+		m.detailError = nil
+		return m, nil
+
+	case createPRResultMsg:
+		m.createPRSubmitting = false
+		if !msg.success {
+			m.createPRError = msg.message
+			return m, nil
+		}
+		// Success: clear dialog state, drop the preview, and load the new PR.
+		m.createPRMode = false
+		m.createPRError = ""
+		m.confirmResult = msg.message
+		newPR := github.PullRequest{
+			Repository: msg.owner + "/" + msg.repo,
+		}
+		if msg.pr != nil {
+			newPR.Number = msg.pr.Number
+			newPR.URL = msg.pr.URL
+		}
+		m.detailPreview = false
+		m.detailPreviewBranch = github.Branch{}
+		m.detailLoading = true
+		m.detailData = nil
+		m.detailError = nil
+		(&m).resetBrowseDialog()
+		return m, tea.Batch(m.fetchPRDetail(newPR), m.fetchPRs())
+
 	case prActionResultMsg:
 		m.confirmLoading = false
 		m.confirmMode = ""
@@ -452,6 +605,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// Clear result banner on any key press
 	m.confirmResult = ""
+
+	// Create-PR dialog intercepts all keys (sits above the diff preview).
+	if m.createPRMode {
+		return m.handleCreatePRKey(msg)
+	}
 
 	// Confirmation dialog intercepts all keys
 	if m.confirmMode != "" {
@@ -763,6 +921,19 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+	case "P":
+		// Open the branch picker for the repo under the cursor — works
+		// whether the cursor is on a PR row or a repo group header.
+		ps := m.currentPageSize()
+		items, _ := m.pagedDisplayItems(ps)
+		if m.cursor >= 0 && m.cursor < len(items) {
+			repoFull := itemRepo(items[m.cursor])
+			owner, repo := github.SplitOwnerRepo(repoFull)
+			if owner != "" && repo != "" {
+				return (&m).enterBranchStep(owner, repo, true)
+			}
+		}
+		return m, nil
 	}
 
 	return m, nil
@@ -806,6 +977,11 @@ func (m Model) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleBrowseKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Branch-picker step has its own key handling.
+	if m.browseBranchStep {
+		return m.handleBrowseBranchKey(msg)
+	}
+
 	// Handle paste: use raw runes (msg.String() wraps pastes in [...])
 	if msg.Paste {
 		m.browseInput += string(msg.Runes)
@@ -828,8 +1004,18 @@ func (m Model) handleBrowseKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.browseRepoCursor++
 		}
 		return m, nil
+	case "P":
+		// Open the branch picker for the highlighted repo suggestion.
+		if len(m.browseRepoSuggestions) > 0 && m.browseRepoCursor >= 0 && m.browseRepoCursor < len(m.browseRepoSuggestions) {
+			sel := m.browseRepoSuggestions[m.browseRepoCursor]
+			owner, repo := github.SplitOwnerRepo(sel.NameWithOwner)
+			if owner != "" && repo != "" {
+				return (&m).enterBranchStep(owner, repo, false)
+			}
+		}
+		return m, nil
 	case "enter":
-		// If we have repo suggestions, Enter picks the highlighted one.
+		// Enter on a repo suggestion loads its open PRs (original behavior).
 		if len(m.browseRepoSuggestions) > 0 && m.browseRepoCursor >= 0 && m.browseRepoCursor < len(m.browseRepoSuggestions) {
 			sel := m.browseRepoSuggestions[m.browseRepoCursor]
 			owner, repo := github.SplitOwnerRepo(sel.NameWithOwner)
@@ -903,6 +1089,140 @@ func (m *Model) resetBrowseDialog() {
 	m.browseRepoCursor = 0
 	m.browseRepoLoading = false
 	m.browseRepoError = ""
+	m.browseBranchStep = false
+	m.browseBranchFromList = false
+	m.browseBranchOwner = ""
+	m.browseBranchRepo = ""
+	m.browseBranchDefault = ""
+	m.browseBranches = nil
+	m.browseBranchCursor = 0
+	m.browseBranchLoading = false
+	m.browseBranchError = ""
+	m.browsePrevInput = ""
+	m.browsePrevSuggestions = nil
+	m.browsePrevCursor = 0
+}
+
+// enterBranchStep transitions the Browse dialog directly into the
+// branch-picker step for a specific repo and kicks off the branch fetch.
+// fromList records whether the caller is the list-view P key (true) or the
+// in-dialog repo-search P key (false); this drives Esc back-nav.
+// Caller is expected to be operating on a pointer receiver.
+func (m *Model) enterBranchStep(owner, repo string, fromList bool) (tea.Model, tea.Cmd) {
+	// Snapshot the repo-search state when entering from the dialog, so Esc
+	// can restore the user's prior search input and suggestion list.
+	if !fromList {
+		m.browsePrevInput = m.browseInput
+		m.browsePrevSuggestions = m.browseRepoSuggestions
+		m.browsePrevCursor = m.browseRepoCursor
+	} else {
+		m.browsePrevInput = ""
+		m.browsePrevSuggestions = nil
+		m.browsePrevCursor = 0
+	}
+	m.browseMode = true
+	m.browseBranchStep = true
+	m.browseBranchFromList = fromList
+	m.browseBranchOwner = owner
+	m.browseBranchRepo = repo
+	m.browseBranchDefault = ""
+	m.browseBranches = nil
+	m.browseBranchCursor = 0
+	m.browseBranchLoading = true
+	m.browseBranchError = ""
+	m.browseInput = ""
+	m.browseError = ""
+	m.browseRepoSuggestions = nil
+	m.browseRepoCursor = 0
+	m.browseRepoLoading = false
+	m.browseRepoError = ""
+	return *m, m.fetchUserBranches(owner, repo)
+}
+
+// handleBrowseBranchKey runs once the user has picked a repo and the dialog
+// is showing the viewer's branches in that repo.
+func (m Model) handleBrowseBranchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.browseBranchLoading {
+		// Allow esc to back out even while loading.
+		if msg.String() == "esc" {
+			(&m).leaveBranchStep()
+		}
+		return m, nil
+	}
+
+	switch msg.String() {
+	case "esc":
+		(&m).leaveBranchStep()
+		return m, nil
+	case "up", "k":
+		if m.browseBranchCursor > 0 {
+			m.browseBranchCursor--
+		}
+		return m, nil
+	case "down", "j":
+		if m.browseBranchCursor < len(m.browseBranches)-1 {
+			m.browseBranchCursor++
+		}
+		return m, nil
+	case "enter":
+		if m.browseBranchCursor < 0 || m.browseBranchCursor >= len(m.browseBranches) {
+			return m, nil
+		}
+		branch := m.browseBranches[m.browseBranchCursor]
+		base := m.browseBranchDefault
+		owner := m.browseBranchOwner
+		repo := m.browseBranchRepo
+		// Hide the dialog (so the preview shows through) but PRESERVE branch
+		// state so Esc on the preview can restore the picker without re-fetch.
+		m.browseMode = false
+		m.showDetail = true
+		m.detailLoading = true
+		m.detailData = nil
+		m.detailError = nil
+		m.detailFocus = 0
+		m.detailRightTab = 0
+		m.fileCursor = 0
+		m.fileListScroll = 0
+		m.diffScroll = 0
+		m.infoScroll = 0
+		m.checkCursor = 0
+		m.diffCursor = 0
+		m.detailPreview = true
+		m.detailPreviewBranch = branch
+		return m, m.fetchCompareDiff(owner, repo, base, branch)
+	}
+	return m, nil
+}
+
+// leaveBranchStep handles Esc from the branch-picker step. If the picker was
+// opened directly from the list view (P key), Esc closes the whole dialog.
+// Otherwise, Esc backs out to the repo-search step and restores the prior
+// search input and suggestion list captured when we entered.
+func (m *Model) leaveBranchStep() {
+	if m.browseBranchFromList {
+		m.resetBrowseDialog()
+		return
+	}
+	m.browseBranchStep = false
+	m.browseBranchFromList = false
+	m.browseBranchOwner = ""
+	m.browseBranchRepo = ""
+	m.browseBranchDefault = ""
+	m.browseBranches = nil
+	m.browseBranchCursor = 0
+	m.browseBranchLoading = false
+	m.browseBranchError = ""
+	// Restore the repo-search state captured on entry.
+	m.browseMode = true
+	m.browseInput = m.browsePrevInput
+	m.browseError = ""
+	m.browseRepoSuggestions = m.browsePrevSuggestions
+	m.browseRepoCursor = m.browsePrevCursor
+	m.browseRepoLoading = false
+	m.browseRepoError = ""
+	m.browsePrevInput = ""
+	m.browsePrevSuggestions = nil
+	m.browsePrevCursor = 0
 }
 
 // startRepoSearchIfNeeded decides whether the current input looks like a repo
@@ -1005,13 +1325,49 @@ func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Global keys (any focus)
 	switch msg.String() {
 	case "esc":
+		// In a branch-compare preview, Esc backs to the branch picker rather
+		// than dropping straight to the underlying list.
+		if m.detailPreview {
+			m.showDetail = false
+			m.detailData = nil
+			m.detailLoading = false
+			m.detailError = nil
+			m.detailPreview = false
+			m.detailPreviewBranch = github.Branch{}
+			// Branch-step state is still alive — just re-show the dialog.
+			m.browseMode = true
+			return m, nil
+		}
 		m.showDetail = false
 		m.detailData = nil
 		m.detailLoading = false
 		m.detailError = nil
 		return m, nil
+	case "P":
+		// Create-PR from a branch-compare preview.
+		if m.detailPreview && m.detailData != nil {
+			owner, repo := github.SplitOwnerRepo(m.detailData.Repository)
+			m.createPRMode = true
+			m.createPROwner = owner
+			m.createPRRepo = repo
+			m.createPRHead = m.detailData.HeadRefName
+			m.createPRTitle = strings.TrimSpace(m.detailPreviewBranch.LastCommitSubject)
+			if m.createPRTitle == "" {
+				m.createPRTitle = m.detailPreviewBranch.Name
+			}
+			m.createPRBody = m.detailPreviewBranch.LastCommitBody
+			m.createPRBase = m.detailData.BaseRefName
+			m.createPRFocus = 0
+			m.createPRSubmitting = false
+			m.createPRError = ""
+		}
+		return m, nil
 	case "o":
 		if m.detailData != nil {
+			// Preview has no real URL yet; ignore browser-open.
+			if m.detailPreview {
+				return m, nil
+			}
 			// Context-aware: open check URL when info panel is focused with checks
 			if m.detailFocus == 1 && m.detailRightTab == 1 && len(m.detailData.Checks) > 0 {
 				ch := m.detailData.Checks[m.checkCursor]
@@ -1051,6 +1407,9 @@ func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.detailFocus = 1 - m.detailFocus
 		return m, nil
 	case "r":
+		if m.detailPreview {
+			return m, nil
+		}
 		ps := m.currentPageSize()
 		items, _ := m.pagedDisplayItems(ps)
 		if m.cursor >= 0 && m.cursor < len(items) && items[m.cursor].isPR {
@@ -1061,7 +1420,7 @@ func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "A":
-		if m.detailData != nil {
+		if m.detailData != nil && !m.detailPreview {
 			owner, repo := github.SplitOwnerRepo(m.detailData.Repository)
 			m.confirmMode = "approve"
 			m.confirmInput = ""
@@ -1075,7 +1434,7 @@ func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "X":
-		if m.detailData != nil {
+		if m.detailData != nil && !m.detailPreview {
 			owner, repo := github.SplitOwnerRepo(m.detailData.Repository)
 			m.confirmMode = "reject"
 			m.confirmInput = ""
@@ -1089,7 +1448,7 @@ func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "M":
-		if m.activeSection == github.SectionCreated && m.detailData != nil {
+		if !m.detailPreview && m.activeSection == github.SectionCreated && m.detailData != nil {
 			owner, repo := github.SplitOwnerRepo(m.detailData.Repository)
 			m.confirmMode = "merge"
 			m.confirmInput = ""
@@ -1104,7 +1463,7 @@ func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "E":
 		// Close or reopen PR (E = end the PR's life / reopen it)
-		if m.detailData != nil && m.detailData.State != "MERGED" {
+		if !m.detailPreview && m.detailData != nil && m.detailData.State != "MERGED" {
 			owner, repo := github.SplitOwnerRepo(m.detailData.Repository)
 			if m.detailData.State == "CLOSED" {
 				m.confirmMode = "reopen"
@@ -1139,7 +1498,7 @@ func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "D":
 		// Toggle draft status
-		if m.detailData != nil && m.detailData.State == "OPEN" {
+		if !m.detailPreview && m.detailData != nil && m.detailData.State == "OPEN" {
 			owner, repo := github.SplitOwnerRepo(m.detailData.Repository)
 			if m.detailData.IsDraft {
 				m.confirmMode = "ready"
@@ -1157,6 +1516,9 @@ func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "c":
+		if m.detailPreview {
+			return m, nil
+		}
 		if m.detailData != nil {
 			// If diff panel focused on a commentable line, do inline review comment
 			if m.detailFocus == 1 && m.detailRightTab == 0 && m.fileCursor < len(m.detailData.Files) {
@@ -1327,6 +1689,97 @@ func (m Model) diffLineCount() int {
 		return 0
 	}
 	return len(strings.Split(f.Patch, "\n"))
+}
+
+func (m Model) handleCreatePRKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.createPRSubmitting {
+		return m, nil
+	}
+
+	// Paste: append into the focused field as raw runes.
+	if msg.Paste {
+		m.createPRError = ""
+		m.appendCreatePRField(string(msg.Runes))
+		return m, nil
+	}
+
+	switch msg.String() {
+	case "esc":
+		m.createPRMode = false
+		m.createPRError = ""
+		m.createPRSubmitting = false
+		return m, nil
+	case "tab":
+		m.createPRFocus = (m.createPRFocus + 1) % 3
+		return m, nil
+	case "shift+tab":
+		m.createPRFocus = (m.createPRFocus + 2) % 3
+		return m, nil
+	case "ctrl+s":
+		// Submit
+		if strings.TrimSpace(m.createPRTitle) == "" {
+			m.createPRError = "Title is required"
+			return m, nil
+		}
+		if strings.TrimSpace(m.createPRBase) == "" {
+			m.createPRError = "Base branch is required"
+			return m, nil
+		}
+		m.createPRSubmitting = true
+		m.createPRError = ""
+		return m, m.submitCreatePR()
+	case "enter":
+		// Enter submits from title/base; inserts a newline in the body field.
+		if m.createPRFocus == 1 {
+			m.createPRBody += "\n"
+			return m, nil
+		}
+		if strings.TrimSpace(m.createPRTitle) == "" {
+			m.createPRError = "Title is required"
+			return m, nil
+		}
+		if strings.TrimSpace(m.createPRBase) == "" {
+			m.createPRError = "Base branch is required"
+			return m, nil
+		}
+		m.createPRSubmitting = true
+		m.createPRError = ""
+		return m, m.submitCreatePR()
+	case "backspace":
+		m.createPRError = ""
+		switch m.createPRFocus {
+		case 0:
+			if len(m.createPRTitle) > 0 {
+				m.createPRTitle = m.createPRTitle[:len(m.createPRTitle)-1]
+			}
+		case 1:
+			if len(m.createPRBody) > 0 {
+				m.createPRBody = m.createPRBody[:len(m.createPRBody)-1]
+			}
+		case 2:
+			if len(m.createPRBase) > 0 {
+				m.createPRBase = m.createPRBase[:len(m.createPRBase)-1]
+			}
+		}
+		return m, nil
+	default:
+		if len(msg.String()) == 1 {
+			m.createPRError = ""
+			m.appendCreatePRField(msg.String())
+		}
+		return m, nil
+	}
+}
+
+func (m *Model) appendCreatePRField(s string) {
+	switch m.createPRFocus {
+	case 0:
+		m.createPRTitle += s
+	case 1:
+		m.createPRBody += s
+	case 2:
+		m.createPRBase += s
+	}
 }
 
 func (m Model) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1766,19 +2219,25 @@ func (m Model) View() string {
 		return m.renderFavoritesDialog()
 	}
 
+	// Create-PR dialog overlay (top-most when active)
+	if m.createPRMode {
+		return m.renderCreatePRDialog()
+	}
+
 	// Confirmation dialog overlay
 	if m.confirmMode != "" {
 		return m.renderConfirmDialog()
 	}
 
+	// Browse PR dialog overlay (must come before detail view so the branch
+	// picker remains reachable while a preview is loading in the background).
+	if m.browseMode {
+		return m.renderBrowseDialog()
+	}
+
 	// Detail view overlay
 	if m.showDetail {
 		return m.renderDetailView()
-	}
-
-	// Browse PR dialog overlay
-	if m.browseMode {
-		return m.renderBrowseDialog()
 	}
 
 	// Preset picker overlay (full screen, no box)
@@ -1997,8 +2456,6 @@ func (m Model) renderPresetPicker() string {
 }
 
 func (m Model) renderBrowseDialog() string {
-	var lines []string
-
 	boxW := m.width * 2 / 3
 	if boxW < 54 {
 		boxW = 54
@@ -2014,6 +2471,11 @@ func (m Model) renderBrowseDialog() string {
 		inputW = 30
 	}
 
+	if m.browseBranchStep {
+		return m.renderBrowseBranchStep(boxW)
+	}
+
+	var lines []string
 	title := lipgloss.NewStyle().Bold(true).Foreground(secondaryColor).Render("Browse PR")
 	lines = append(lines, title)
 	lines = append(lines, "")
@@ -2057,9 +2519,202 @@ func (m Model) renderBrowseDialog() string {
 	escKey := helpKeyStyle.Render("Esc")
 	if len(m.browseRepoSuggestions) > 0 {
 		upDown := helpKeyStyle.Render("↑↓")
-		lines = append(lines, upDown+" pick  •  "+enterKey+" load repo  •  "+escKey+" cancel")
+		newKey := helpKeyStyle.Render("P")
+		lines = append(lines, upDown+" pick  •  "+enterKey+" view PRs  •  "+newKey+" new PR  •  "+escKey+" cancel")
 	} else {
 		lines = append(lines, enterKey+" open  •  "+escKey+" cancel")
+	}
+
+	content := strings.Join(lines, "\n")
+	overlay := helpOverlayStyle.Width(boxW).Render(content)
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, overlay)
+}
+
+func (m Model) renderBrowseBranchStep(boxW int) string {
+	var lines []string
+	repoLabel := m.browseBranchOwner + "/" + m.browseBranchRepo
+	title := lipgloss.NewStyle().Bold(true).Foreground(secondaryColor).Render("Pick branch — " + repoLabel)
+	lines = append(lines, title)
+	lines = append(lines, "")
+	lines = append(lines, helpDescStyle.Render("Your branches in this repo (Enter to preview diff & create PR):"))
+	lines = append(lines, "")
+
+	switch {
+	case m.browseBranchLoading:
+		lines = append(lines, spinnerStyle.Render("⟳ Loading branches..."))
+	case m.browseBranchError != "":
+		lines = append(lines, lipgloss.NewStyle().Foreground(dangerColor).Render(m.browseBranchError))
+	case len(m.browseBranches) == 0:
+		lines = append(lines, emptyStyle.Render("No branches found where you authored any of the last few commits."))
+	default:
+		maxRows := 12
+		start := 0
+		if m.browseBranchCursor >= maxRows {
+			start = m.browseBranchCursor - maxRows + 1
+		}
+		end := start + maxRows
+		if end > len(m.browseBranches) {
+			end = len(m.browseBranches)
+		}
+
+		// Content width inside the overlay: subtract border (2) + padding (4).
+		contentW := boxW - 6
+		if contentW < 30 {
+			contentW = 30
+		}
+
+		// Compute column widths from the visible slice. Branch and author
+		// columns are sized to the longest value in view, capped so very long
+		// names don't squeeze out the subject column.
+		const (
+			branchCap = 32
+			authorCap = 20
+			gutter    = 2
+			prefixW   = 2 // "▸ " or "  "
+		)
+		branchW := 0
+		authorW := 0
+		for i := start; i < end; i++ {
+			b := m.browseBranches[i]
+			if w := lipgloss.Width(b.Name); w > branchW {
+				branchW = w
+			}
+			a := b.LastCommitAuthor
+			if a != "" {
+				if w := lipgloss.Width("@" + a); w > authorW {
+					authorW = w
+				}
+			}
+		}
+		if branchW > branchCap {
+			branchW = branchCap
+		}
+		if authorW > authorCap {
+			authorW = authorCap
+		}
+		subjectW := contentW - prefixW - branchW - gutter - authorW - gutter
+		if subjectW < 10 {
+			subjectW = 10
+		}
+
+		padRight := func(s string, w int) string {
+			gap := w - lipgloss.Width(s)
+			if gap <= 0 {
+				return s
+			}
+			return s + strings.Repeat(" ", gap)
+		}
+		padLeft := func(s string, w int) string {
+			gap := w - lipgloss.Width(s)
+			if gap <= 0 {
+				return s
+			}
+			return strings.Repeat(" ", gap) + s
+		}
+
+		for i := start; i < end; i++ {
+			b := m.browseBranches[i]
+			subject := b.LastCommitSubject
+			if subject == "" {
+				subject = "(no commit subject)"
+			}
+			authorRaw := ""
+			if b.LastCommitAuthor != "" {
+				authorRaw = "@" + b.LastCommitAuthor
+			}
+
+			nameCell := padRight(truncate(b.Name, branchW), branchW)
+			subjCell := padRight(truncate(subject, subjectW), subjectW)
+			authorCell := padLeft(truncate(authorRaw, authorW), authorW)
+
+			row := helpKeyStyle.Render(nameCell) +
+				strings.Repeat(" ", gutter) +
+				helpDescStyle.Render(subjCell) +
+				strings.Repeat(" ", gutter) +
+				ageStyle.Render(authorCell)
+
+			if i == m.browseBranchCursor {
+				lines = append(lines, selectedPRStyle.Render("▸ "+row))
+			} else {
+				lines = append(lines, "  "+row)
+			}
+		}
+		if end < len(m.browseBranches) {
+			lines = append(lines, helpDescStyle.Render(fmt.Sprintf("  …%d more", len(m.browseBranches)-end)))
+		}
+	}
+
+	lines = append(lines, "")
+	enterKey := helpKeyStyle.Render("Enter")
+	escKey := helpKeyStyle.Render("Esc")
+	upDown := helpKeyStyle.Render("↑↓")
+	lines = append(lines, upDown+" pick  •  "+enterKey+" preview diff  •  "+escKey+" cancel")
+
+	content := strings.Join(lines, "\n")
+	overlay := helpOverlayStyle.Width(boxW).Render(content)
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, overlay)
+}
+
+func (m Model) renderCreatePRDialog() string {
+	var lines []string
+
+	boxW := m.width * 2 / 3
+	if boxW < 60 {
+		boxW = 60
+	}
+	if boxW > 110 {
+		boxW = 110
+	}
+	if boxW > m.width-4 {
+		boxW = m.width - 4
+	}
+	inputW := boxW - 10
+	if inputW < 40 {
+		inputW = 40
+	}
+
+	title := lipgloss.NewStyle().Bold(true).Foreground(primaryColor).Render(
+		fmt.Sprintf("Create PR — %s/%s", m.createPROwner, m.createPRRepo))
+	lines = append(lines, title)
+	lines = append(lines, "")
+	lines = append(lines, helpDescStyle.Render(fmt.Sprintf("from %s into %s", m.createPRHead, m.createPRBase)))
+	lines = append(lines, "")
+
+	field := func(label, value string, focused bool, height int) {
+		labelStr := helpDescStyle.Render(label)
+		cursor := ""
+		if focused {
+			cursor = "█"
+		}
+		box := confirmInputStyle.Width(inputW)
+		if height > 1 {
+			box = box.Height(height)
+		}
+		content := value + cursor
+		lines = append(lines, labelStr)
+		lines = append(lines, box.Render(content))
+	}
+
+	field("Title (required):", m.createPRTitle, m.createPRFocus == 0, 1)
+	lines = append(lines, "")
+	field("Body:", m.createPRBody, m.createPRFocus == 1, 4)
+	lines = append(lines, "")
+	field("Base branch:", m.createPRBase, m.createPRFocus == 2, 1)
+
+	if m.createPRError != "" {
+		lines = append(lines, "")
+		lines = append(lines, lipgloss.NewStyle().Foreground(dangerColor).Render(m.createPRError))
+	}
+
+	lines = append(lines, "")
+	if m.createPRSubmitting {
+		lines = append(lines, spinnerStyle.Render("⟳ Creating PR..."))
+	} else {
+		tabKey := helpKeyStyle.Render("Tab")
+		enterKey := helpKeyStyle.Render("Enter")
+		submitKey := helpKeyStyle.Render("Ctrl+S")
+		escKey := helpKeyStyle.Render("Esc")
+		lines = append(lines, tabKey+" next field  •  "+enterKey+" submit ("+helpKeyStyle.Render("\\n")+" in body)  •  "+submitKey+" submit  •  "+escKey+" cancel")
 	}
 
 	content := strings.Join(lines, "\n")
@@ -2239,6 +2894,53 @@ func (m Model) fetchRepoOpenPRs(owner, repo string) tea.Cmd {
 	return func() tea.Msg {
 		prs, err := client.FetchOpenPRsInRepo(owner, repo)
 		return repoPRsLoadedMsg{prs: prs, err: err}
+	}
+}
+
+func (m Model) fetchUserBranches(owner, repo string) tea.Cmd {
+	client := m.client
+	username := m.username
+	return func() tea.Msg {
+		info, err := client.ListUserBranches(owner, repo, username)
+		return branchesLoadedMsg{
+			owner:         owner,
+			repo:          repo,
+			defaultBranch: info.DefaultBranch,
+			branches:      info.Branches,
+			err:           err,
+		}
+	}
+}
+
+func (m Model) fetchCompareDiff(owner, repo, base string, branch github.Branch) tea.Cmd {
+	client := m.client
+	return func() tea.Msg {
+		files, err := client.CompareBranches(owner, repo, base, branch.Name)
+		return compareLoadedMsg{
+			owner:  owner,
+			repo:   repo,
+			base:   base,
+			branch: branch,
+			files:  files,
+			err:    err,
+		}
+	}
+}
+
+func (m Model) submitCreatePR() tea.Cmd {
+	client := m.client
+	owner := m.createPROwner
+	repo := m.createPRRepo
+	head := m.createPRHead
+	title := strings.TrimSpace(m.createPRTitle)
+	body := m.createPRBody
+	base := strings.TrimSpace(m.createPRBase)
+	return func() tea.Msg {
+		pr, err := client.CreatePullRequest(owner, repo, title, body, head, base, false)
+		if err != nil {
+			return createPRResultMsg{success: false, message: fmt.Sprintf("✗ Failed to create PR: %v", err), owner: owner, repo: repo}
+		}
+		return createPRResultMsg{success: true, message: fmt.Sprintf("✓ PR #%d created", pr.Number), pr: pr, owner: owner, repo: repo}
 	}
 }
 
