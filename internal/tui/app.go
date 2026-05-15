@@ -135,6 +135,7 @@ type Model struct {
 	browseBranchCursor   int
 	browseBranchLoading  bool
 	browseBranchError    string
+	browseBranchSearch   string // fuzzy filter typed within the branch picker
 	// True when the branch picker was opened directly from the list view
 	// (cursor row's repo). Used so Esc on the branch picker closes the dialog
 	// entirely, rather than dropping into an empty repo-search step.
@@ -1098,6 +1099,7 @@ func (m *Model) resetBrowseDialog() {
 	m.browseBranchCursor = 0
 	m.browseBranchLoading = false
 	m.browseBranchError = ""
+	m.browseBranchSearch = ""
 	m.browsePrevInput = ""
 	m.browsePrevSuggestions = nil
 	m.browsePrevCursor = 0
@@ -1150,25 +1152,41 @@ func (m Model) handleBrowseBranchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// Paste appends raw runes into the search filter.
+	if msg.Paste {
+		m.browseBranchSearch += string(msg.Runes)
+		m.browseBranchCursor = 0
+		return m, nil
+	}
+
 	switch msg.String() {
 	case "esc":
+		// First Esc clears an active filter; second Esc backs out.
+		if m.browseBranchSearch != "" {
+			m.browseBranchSearch = ""
+			m.browseBranchCursor = 0
+			return m, nil
+		}
 		(&m).leaveBranchStep()
 		return m, nil
-	case "up", "k":
-		if m.browseBranchCursor > 0 {
+	case "up":
+		filtered := fuzzyFilterBranches(m.browseBranchSearch, m.browseBranches)
+		if m.browseBranchCursor > 0 && m.browseBranchCursor < len(filtered) {
 			m.browseBranchCursor--
 		}
 		return m, nil
-	case "down", "j":
-		if m.browseBranchCursor < len(m.browseBranches)-1 {
+	case "down":
+		filtered := fuzzyFilterBranches(m.browseBranchSearch, m.browseBranches)
+		if m.browseBranchCursor < len(filtered)-1 {
 			m.browseBranchCursor++
 		}
 		return m, nil
 	case "enter":
-		if m.browseBranchCursor < 0 || m.browseBranchCursor >= len(m.browseBranches) {
+		filtered := fuzzyFilterBranches(m.browseBranchSearch, m.browseBranches)
+		if m.browseBranchCursor < 0 || m.browseBranchCursor >= len(filtered) {
 			return m, nil
 		}
-		branch := m.browseBranches[m.browseBranchCursor]
+		branch := filtered[m.browseBranchCursor]
 		base := m.browseBranchDefault
 		owner := m.browseBranchOwner
 		repo := m.browseBranchRepo
@@ -1190,8 +1208,20 @@ func (m Model) handleBrowseBranchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.detailPreview = true
 		m.detailPreviewBranch = branch
 		return m, m.fetchCompareDiff(owner, repo, base, branch)
+	case "backspace":
+		if len(m.browseBranchSearch) > 0 {
+			m.browseBranchSearch = m.browseBranchSearch[:len(m.browseBranchSearch)-1]
+			m.browseBranchCursor = 0
+		}
+		return m, nil
+	default:
+		// Single printable rune typed → append to filter.
+		if len(msg.String()) == 1 {
+			m.browseBranchSearch += msg.String()
+			m.browseBranchCursor = 0
+		}
+		return m, nil
 	}
-	return m, nil
 }
 
 // leaveBranchStep handles Esc from the branch-picker step. If the picker was
@@ -1212,6 +1242,7 @@ func (m *Model) leaveBranchStep() {
 	m.browseBranchCursor = 0
 	m.browseBranchLoading = false
 	m.browseBranchError = ""
+	m.browseBranchSearch = ""
 	// Restore the repo-search state captured on entry.
 	m.browseMode = true
 	m.browseInput = m.browsePrevInput
@@ -2536,8 +2567,18 @@ func (m Model) renderBrowseBranchStep(boxW int) string {
 	title := lipgloss.NewStyle().Bold(true).Foreground(secondaryColor).Render("Pick branch — " + repoLabel)
 	lines = append(lines, title)
 	lines = append(lines, "")
-	lines = append(lines, helpDescStyle.Render("Your branches in this repo (Enter to preview diff & create PR):"))
+	lines = append(lines, helpDescStyle.Render("Type to fuzzy-filter • Enter to preview diff & create PR:"))
+
+	// Search prompt always visible so it's clear typing filters.
+	prompt := filterChipStyle.Render("/") + " " + m.browseBranchSearch + "█"
+	lines = append(lines, prompt)
 	lines = append(lines, "")
+
+	// Apply fuzzy filter to the underlying branch list.
+	filtered := fuzzyFilterBranches(m.browseBranchSearch, m.browseBranches)
+	if m.browseBranchCursor >= len(filtered) {
+		m.browseBranchCursor = 0
+	}
 
 	switch {
 	case m.browseBranchLoading:
@@ -2546,6 +2587,8 @@ func (m Model) renderBrowseBranchStep(boxW int) string {
 		lines = append(lines, lipgloss.NewStyle().Foreground(dangerColor).Render(m.browseBranchError))
 	case len(m.browseBranches) == 0:
 		lines = append(lines, emptyStyle.Render("No branches found where you authored any of the last few commits."))
+	case len(filtered) == 0:
+		lines = append(lines, emptyStyle.Render("No branches match this filter."))
 	default:
 		maxRows := 12
 		start := 0
@@ -2553,8 +2596,8 @@ func (m Model) renderBrowseBranchStep(boxW int) string {
 			start = m.browseBranchCursor - maxRows + 1
 		}
 		end := start + maxRows
-		if end > len(m.browseBranches) {
-			end = len(m.browseBranches)
+		if end > len(filtered) {
+			end = len(filtered)
 		}
 
 		// Content width inside the overlay: subtract border (2) + padding (4).
@@ -2575,7 +2618,7 @@ func (m Model) renderBrowseBranchStep(boxW int) string {
 		branchW := 0
 		authorW := 0
 		for i := start; i < end; i++ {
-			b := m.browseBranches[i]
+			b := filtered[i]
 			if w := lipgloss.Width(b.Name); w > branchW {
 				branchW = w
 			}
@@ -2613,7 +2656,7 @@ func (m Model) renderBrowseBranchStep(boxW int) string {
 		}
 
 		for i := start; i < end; i++ {
-			b := m.browseBranches[i]
+			b := filtered[i]
 			subject := b.LastCommitSubject
 			if subject == "" {
 				subject = "(no commit subject)"
@@ -2639,8 +2682,8 @@ func (m Model) renderBrowseBranchStep(boxW int) string {
 				lines = append(lines, "  "+row)
 			}
 		}
-		if end < len(m.browseBranches) {
-			lines = append(lines, helpDescStyle.Render(fmt.Sprintf("  …%d more", len(m.browseBranches)-end)))
+		if end < len(filtered) {
+			lines = append(lines, helpDescStyle.Render(fmt.Sprintf("  …%d more", len(filtered)-end)))
 		}
 	}
 

@@ -35,6 +35,30 @@ func fuzzyFilter(query string, prs []github.PullRequest) []github.PullRequest {
 	return result
 }
 
+type searchableBranches struct {
+	branches []github.Branch
+}
+
+func (s searchableBranches) String(i int) string {
+	b := s.branches[i]
+	return b.Name + " " + b.LastCommitSubject + " " + b.LastCommitAuthor
+}
+
+func (s searchableBranches) Len() int { return len(s.branches) }
+
+func fuzzyFilterBranches(query string, branches []github.Branch) []github.Branch {
+	if query == "" {
+		return branches
+	}
+	source := searchableBranches{branches: branches}
+	matches := fuzzy.FindFrom(query, source)
+	result := make([]github.Branch, len(matches))
+	for i, m := range matches {
+		result[i] = branches[m.Index]
+	}
+	return result
+}
+
 func renderFilterBar(filterExpr string, searchMode bool, searchQuery string, width int) string {
 	if searchMode {
 		prompt := filterChipStyle.Render("/")
