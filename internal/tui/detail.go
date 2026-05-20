@@ -13,6 +13,8 @@ import (
 // diffLineInfo holds metadata for a single diff line to enable commenting.
 type diffLineInfo struct {
 	line        int    // file line number (0 if non-commentable)
+	oldLine     int    // old-side file line number (0 if N/A)
+	newLine     int    // new-side file line number (0 if N/A)
 	side        string // "LEFT", "RIGHT", or ""
 	commentable bool
 }
@@ -31,23 +33,57 @@ func parseDiffLinesMeta(patch string) []diffLineInfo {
 			newLine = new
 			result[i] = diffLineInfo{commentable: false}
 		} else if strings.HasPrefix(line, "+") {
-			result[i] = diffLineInfo{line: newLine, side: "RIGHT", commentable: true}
+			result[i] = diffLineInfo{line: newLine, newLine: newLine, side: "RIGHT", commentable: true}
 			newLine++
 		} else if strings.HasPrefix(line, "-") {
-			result[i] = diffLineInfo{line: oldLine, side: "LEFT", commentable: true}
+			result[i] = diffLineInfo{line: oldLine, oldLine: oldLine, side: "LEFT", commentable: true}
 			oldLine++
 		} else if line == "" && i == len(lines)-1 {
 			// trailing empty line
 			result[i] = diffLineInfo{commentable: false}
 		} else {
 			// context line
-			result[i] = diffLineInfo{line: newLine, side: "RIGHT", commentable: true}
+			result[i] = diffLineInfo{line: newLine, oldLine: oldLine, newLine: newLine, side: "RIGHT", commentable: true}
 			oldLine++
 			newLine++
 		}
 	}
 
 	return result
+}
+
+// diffLineNumWidth returns the column width needed to render every new-side
+// line number in the patch right-aligned. Minimum of 2 to keep narrow patches
+// from looking cramped.
+func diffLineNumWidth(meta []diffLineInfo) int {
+	maxLine := 0
+	for _, m := range meta {
+		if m.newLine > maxLine {
+			maxLine = m.newLine
+		}
+	}
+	w := len(fmt.Sprintf("%d", maxLine))
+	if w < 2 {
+		w = 2
+	}
+	return w
+}
+
+// diffLineNumPrefix builds the " NEW │ " prefix shown before each diff line.
+// Only the new-side line number is rendered; removed and hunk-header rows get
+// a blank-but-same-width column so the separator stays aligned.
+// continuation=true emits a same-width blank prefix used for wrapped continuation
+// rows.
+func diffLineNumPrefix(info diffLineInfo, numWidth int, continuation bool) string {
+	pad := strings.Repeat(" ", numWidth)
+	if continuation {
+		return " " + pad + " │ "
+	}
+	newStr := pad
+	if info.newLine > 0 {
+		newStr = fmt.Sprintf("%*d", numWidth, info.newLine)
+	}
+	return " " + newStr + " │ "
 }
 
 // parseHunkHeader extracts old and new starting line numbers from a hunk header.
@@ -351,6 +387,19 @@ func (m Model) renderFileListPanel(width, height int, d *github.PRDetail) string
 
 	contentW := width - 4 // border + padding
 
+	// Pre-compute the widest "+N" and "-N" cells across the file list so each
+	// row can right-align its stats to the same column boundaries. Without this
+	// the +/- numbers visibly jitter between rows of different magnitudes.
+	addW, delW := 2, 2
+	for _, f := range d.Files {
+		if w := len(fmt.Sprintf("+%d", f.Additions)); w > addW {
+			addW = w
+		}
+		if w := len(fmt.Sprintf("-%d", f.Deletions)); w > delW {
+			delW = w
+		}
+	}
+
 	// Render lines grouped by directory.
 	var lines []string
 	cursorLine := -1 // rendered line index of selected file
@@ -366,20 +415,25 @@ func (m Model) renderFileListPanel(width, height int, d *github.PRDetail) string
 			if lastDir != "" {
 				lines = append(lines, "") // blank separator between groups
 			}
-			// Truncate long directory paths so the header doesn't exceed the
-			// panel's content area — otherwise lipgloss wraps it and the panel
-			// renders taller than panelH, breaking the split-screen layout.
-			headerText := "📁 " + dir
-			if lipgloss.Width(headerText) > contentW {
-				headerText = truncateLeft(headerText, contentW)
+			// Truncate the directory path (not the icon) so the folder icon is
+			// always visible even when the user shrinks the panel — otherwise
+			// truncateLeft eats the leading "📁 " prefix on long paths.
+			iconPrefix := "📁 "
+			dirMaxW := contentW - lipgloss.Width(iconPrefix)
+			if dirMaxW < 3 {
+				dirMaxW = 3
 			}
-			lines = append(lines, helpDescStyle.Render(headerText))
+			dirText := dir
+			if lipgloss.Width(dirText) > dirMaxW {
+				dirText = truncateLeft(dirText, dirMaxW)
+			}
+			lines = append(lines, helpDescStyle.Render(iconPrefix+dirText))
 			lastDir = dir
 		}
 
 		icon := fileStatusIcon(f.Status)
-		addStat := lipgloss.NewStyle().Foreground(successColor).Render(fmt.Sprintf("+%d", f.Additions))
-		delStat := lipgloss.NewStyle().Foreground(dangerColor).Render(fmt.Sprintf("-%d", f.Deletions))
+		addStat := lipgloss.NewStyle().Foreground(successColor).Render(fmt.Sprintf("%*s", addW, fmt.Sprintf("+%d", f.Additions)))
+		delStat := lipgloss.NewStyle().Foreground(dangerColor).Render(fmt.Sprintf("%*s", delW, fmt.Sprintf("-%d", f.Deletions)))
 		stats := addStat + " " + delStat
 
 		// Row layout: "  ICON NAME STATS" — overhead is 5 cells (2 lead + icon
@@ -489,25 +543,39 @@ func (m Model) renderDiffPanel(width, height int, d *github.PRDetail) string {
 		fc := buildFileComments(d.ReviewComments, f.Filename)
 		isFocused := m.detailFocus == 1 && m.detailRightTab == 0
 
+		// Reserve a fixed-width gutter for the new-side line number so the
+		// column stays aligned across the whole patch regardless of hunks.
+		numWidth := diffLineNumWidth(meta)
+		prefixW := numWidth + 4 // " NEW │ "
+		diffContentW := contentW - prefixW
+		if diffContentW < 10 {
+			diffContentW = 10
+		}
+
 		// Track which rendered line the cursor maps to (for auto-scroll)
 		cursorRenderLine := -1
 
 		for i, dl := range patchLines {
+			var lineMeta diffLineInfo
+			if i < len(meta) {
+				lineMeta = meta[i]
+			}
 			// In wrap mode, one source diff line can become several visual
 			// rows; in truncate mode there's always exactly one. Either way,
 			// the cursor highlight is applied to every visual row for the
 			// source line at m.diffCursor so the highlight covers the full
 			// wrapped block.
-			visualRows := diffLineVisualRows(dl, contentW, m.diffWrap)
+			visualRows := diffLineVisualRows(dl, diffContentW, m.diffWrap)
 			isCursor := isFocused && i == m.diffCursor
 			if isCursor {
 				cursorRenderLine = len(lines)
 			}
-			for _, vr := range visualRows {
+			for j, vr := range visualRows {
+				prefix := diffLineNumPrefix(lineMeta, numWidth, j > 0)
 				if isCursor {
-					lines = append(lines, padAndHighlight(vr, contentW, diffCursorStyle))
+					lines = append(lines, padAndHighlight(prefix+vr, contentW, diffCursorStyle))
 				} else {
-					lines = append(lines, styleDiffLine(vr))
+					lines = append(lines, diffContextStyle.Render(prefix)+styleDiffLine(vr))
 				}
 			}
 
@@ -517,10 +585,6 @@ func (m Model) renderDiffPanel(width, height int, d *github.PRDetail) string {
 			}
 
 			// Show existing review comments below matching diff lines
-			var lineMeta diffLineInfo
-			if i < len(meta) {
-				lineMeta = meta[i]
-			}
 			if matched := fc.commentsForDiffLine(i, lineMeta, f.Filename); len(matched) > 0 {
 				for _, c := range matched {
 					lines = append(lines, renderInlineComment(c, contentW)...)
