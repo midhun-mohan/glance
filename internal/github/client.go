@@ -202,6 +202,7 @@ func (c *Client) searchPRs(searchQuery string) ([]PullRequest, error) {
 					}
 					repository {
 						nameWithOwner
+						isArchived
 					}
 					labels(first: 10) {
 						nodes {
@@ -248,6 +249,7 @@ func (c *Client) searchPRs(searchQuery string) ([]PullRequest, error) {
 				} `json:"author"`
 				Repository struct {
 					NameWithOwner string `json:"nameWithOwner"`
+					IsArchived    bool   `json:"isArchived"`
 				} `json:"repository"`
 				Labels struct {
 					Nodes []struct {
@@ -288,6 +290,11 @@ func (c *Client) searchPRs(searchQuery string) ([]PullRequest, error) {
 	prs := make([]PullRequest, 0, len(result.Search.Nodes))
 	for _, node := range result.Search.Nodes {
 		if node.Title == "" {
+			continue
+		}
+		// Skip PRs whose repository was archived after the PR was opened —
+		// GitHub keeps them in "open" state but they're no longer actionable.
+		if node.Repository.IsArchived {
 			continue
 		}
 		author := ""
@@ -1117,6 +1124,9 @@ func (c *Client) ListUserBranches(owner, repo, username string) (RepoInfo, error
 			refs(refPrefix: "refs/heads/", first: 100, orderBy: {field: TAG_COMMIT_DATE, direction: DESC}) {
 				nodes {
 					name
+					associatedPullRequests(first: 1, states: OPEN) {
+						totalCount
+					}
 					target {
 						... on Commit {
 							oid
@@ -1143,7 +1153,10 @@ func (c *Client) ListUserBranches(owner, repo, username string) (RepoInfo, error
 			} `json:"defaultBranchRef"`
 			Refs struct {
 				Nodes []struct {
-					Name   string `json:"name"`
+					Name                   string `json:"name"`
+					AssociatedPullRequests struct {
+						TotalCount int `json:"totalCount"`
+					} `json:"associatedPullRequests"`
 					Target struct {
 						OID             string    `json:"oid"`
 						MessageHeadline string    `json:"messageHeadline"`
@@ -1184,6 +1197,11 @@ func (c *Client) ListUserBranches(owner, repo, username string) (RepoInfo, error
 	}
 	for _, n := range result.Repository.Refs.Nodes {
 		if n.Name == "" || n.Name == info.DefaultBranch {
+			continue
+		}
+		// Hide branches that already have an open PR — picking one would just
+		// duplicate an existing review thread.
+		if n.AssociatedPullRequests.TotalCount > 0 {
 			continue
 		}
 		mine := false
