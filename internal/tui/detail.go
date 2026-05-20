@@ -253,6 +253,15 @@ func (m Model) renderSplitScreen() string {
 		// Always leave at least 25 cols for the diff panel.
 		leftW = totalW - 25
 	}
+	// Cap expansion at the width needed to render the longest file/folder
+	// row, so growing the split with `>` doesn't add trailing whitespace
+	// past the actual text content.
+	if maxW := fileListMaxPanelWidth(d); maxW > 0 && leftW > maxW {
+		leftW = maxW
+		if leftW < 24 {
+			leftW = 24
+		}
+	}
 	rightW := totalW - leftW - 1 // 1 for vertical separator
 
 	// Build left panel content (file list)
@@ -379,6 +388,48 @@ func (m Model) renderDetailFooter(width int) string {
 }
 
 // --- Left Panel: File List ---
+
+// fileListMaxPanelWidth returns the panel width (including border/padding)
+// needed to render every file and folder row without truncation. Used to
+// cap the user-adjustable split so the file viewer can't expand past its
+// actual content.
+func fileListMaxPanelWidth(d *github.PRDetail) int {
+	if d == nil || len(d.Files) == 0 {
+		return 0
+	}
+	addW, delW := 2, 2
+	for _, f := range d.Files {
+		if w := len(fmt.Sprintf("+%d", f.Additions)); w > addW {
+			addW = w
+		}
+		if w := len(fmt.Sprintf("-%d", f.Deletions)); w > delW {
+			delW = w
+		}
+	}
+	statsW := addW + 1 + delW // "+N -N"
+
+	maxContentW := 0
+	dirIconW := lipgloss.Width("📁 ")
+	lastDir := ""
+	for _, f := range d.Files {
+		// File row: "  " + icon(1) + " " + name + " " + stats = 5 + name + stats
+		nameW := lipgloss.Width(filepath.Base(f.Filename))
+		if w := 5 + nameW + statsW; w > maxContentW {
+			maxContentW = w
+		}
+		dir := filepath.Dir(f.Filename)
+		if dir == "." {
+			dir = "/"
+		}
+		if dir != lastDir {
+			if w := dirIconW + lipgloss.Width(dir); w > maxContentW {
+				maxContentW = w
+			}
+			lastDir = dir
+		}
+	}
+	return maxContentW + 4 // border (2) + padding (2)
+}
 
 func (m Model) renderFileListPanel(width, height int, d *github.PRDetail) string {
 	if len(d.Files) == 0 {

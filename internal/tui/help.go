@@ -58,19 +58,31 @@ func renderHelp(width, height int) string {
 		Foreground(primaryColor).
 		Render("Keybindings")
 
+	keyCol, descCol := 0, 0
+	for _, entry := range helpEntries {
+		if w := lipgloss.Width(entry.key); w > keyCol {
+			keyCol = w
+		}
+		if w := lipgloss.Width(entry.desc); w > descCol {
+			descCol = w
+		}
+	}
+
 	var lines []string
 	lines = append(lines, title)
 	lines = append(lines, "")
 
 	for _, entry := range helpEntries {
-		key := helpKeyStyle.Width(12).Render(entry.key)
+		key := helpKeyStyle.Width(keyCol).Render(entry.key)
 		desc := helpDescStyle.Render(entry.desc)
 		lines = append(lines, "  "+key+" "+desc)
 	}
 
 	content := strings.Join(lines, "\n")
 
-	maxWidth := 40
+	// Overlay sizing: 2 leading spaces + key column + 1 space + desc column,
+	// plus border (2) and padding (2*2) from helpOverlayStyle.
+	maxWidth := 2 + keyCol + 1 + descCol + 6
 	if width-4 < maxWidth {
 		maxWidth = width - 4
 	}

@@ -8,7 +8,7 @@ dist/
 *.out
 .DS_Store
 specs/
-bugs/**
-feature/**
+1-feature/**
+2-bugs/**
+3-security/**
 .claude/**
-security/**
